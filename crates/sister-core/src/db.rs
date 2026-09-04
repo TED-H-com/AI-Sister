@@ -4871,53 +4871,42 @@ impl Db {
             .map_err(Into::into)
     }
 
-    /// 最近一輪**看過卡片**的審閱，她拒絕掉了哪幾個模型指的下一步。
+    /// 最近一輪**問過模型**的審閱，她拒絕掉了哪幾個模型指的下一步。
     ///
-    /// **三種，不是「一個 `Vec`」。** 「還沒跑過一輪看得了卡片的」、
-    /// 「跑過而且沒拒絕任何東西」、「跑過而且拒絕了這幾個」是三件事；
-    /// 前兩種折成空 `Vec` 的話，一台從來沒跑過 reviewer 的機器會顯示成
-    /// 「她什麼都沒拒絕」。
+    /// **三種，不是「一個 `Vec`」。** 「還沒問過模型」、
+    /// 「問過而且沒拒絕任何東西」、「問過而且拒絕了這幾個」是三件事；
+    /// 前兩種折成空 `Vec` 的話，一台裝好、跑過巡邏、但還沒問過模型的機器
+    /// 會顯示成「她什麼都沒拒絕」。
     ///
-    /// 沒有候選的那一輪 `skip_reason` 仍是 `NULL`（她確實跑過、候選 0），
-    /// 但它**沒看過任何卡片**，沒有資格回答這個問題。判準是這一列的
-    /// `candidate_count == 0`——空的 interval 和空的 eod 都寫 0，eod 的
-    /// notes 還是空字串，對不上任何文案開頭。這一支會跨過那些列，往前
-    /// 找到最近一輪真的看過的。說明仍在 [`Self::latest_reviewer_notes`]，
-    /// 讀的是最新那一列，兩支讀的不一定是同一列。
+    /// 一輪可以 `skip_reason IS NULL` 卻零次呼叫（卡片全審過了、預算剩不到
+    /// 兩次、原件被清掉、或沒有承諾候選）。那種一輪沒問過模型，沒有資格
+    /// 回答「她拒絕了什麼」。判準跟 [`Self::entity_memory`] 同一個門檻：
+    /// `calls_used > 0`（`calls` 只會 `+= 2`，所以 `> 0` 和 `>= 2` 等價；
+    /// 問的都是「有沒有開過 CLI」）。`candidate_count` 數的是回查次數，
+    /// 在三個 `continue` 之前就加了，不能拿來當「問過模型」。
     ///
     /// `detail` 只裝真的拒絕。卡片那一段不見了、或「沒有東西可審」那種說明
     /// 在 [`Self::latest_reviewer_notes`]。
     pub fn latest_reviewer_refusals(&self) -> Result<ReviewerRefusals> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, detail, candidate_count FROM reviewer_run
-             WHERE skip_reason IS NULL
-             ORDER BY ts DESC, id DESC",
-        )?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let run_id: i64 = row.get(0)?;
-            let detail: String = row.get(1)?;
-            let candidate_count: Option<i64> = row.get(2)?;
-            // 跳過「候選 0」。空的 interval 和空的 eod 都寫
-            // `candidate_count = Some(0)`、`skip_reason = NULL`。
-            // 正常路徑這個欄位數的是回查次數，不是卡片張數；但沒有候選
-            // 的那一輪兩邊都是 0，所以這一條同時蓋住兩種 kind。
-            //
-            // NULL 不跳過。寫入端只有 `record_skip` 會寫 NULL，而那一類
-            // `skip_reason` 不是 NULL，上面 WHERE 已經濾掉。不要寫成
-            // 「有值就是看過」——那會把照設計寫 NULL 的跳過列，萬一漏進
-            // 這個查詢，當成「看過卡片」。
-            if candidate_count == Some(0) {
-                continue;
-            }
-            let reasons = nonempty_lines(&detail);
-            return Ok(if reasons.is_empty() {
-                ReviewerRefusals::None { run_id }
-            } else {
-                ReviewerRefusals::Some { run_id, reasons }
-            });
-        }
-        Ok(ReviewerRefusals::NeverRan)
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, detail FROM reviewer_run
+                 WHERE skip_reason IS NULL AND calls_used > 0
+                 ORDER BY ts DESC, id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((run_id, detail)) = row else {
+            return Ok(ReviewerRefusals::NeverRan);
+        };
+        let reasons = nonempty_lines(&detail);
+        Ok(if reasons.is_empty() {
+            ReviewerRefusals::None { run_id }
+        } else {
+            ReviewerRefusals::Some { run_id, reasons }
+        })
     }
 
     /// 最近一輪真的跑過的審閱，拒絕以外的說明。
@@ -6782,7 +6771,7 @@ pub enum ReviewerNotes {
 /// `SkipReason::NothingToReview` 的第一句。印在說明那一塊。
 ///
 /// 拒絕那條路不看這句開頭——沒有候選的 eod 寫的 notes 是空字串，對不上。
-/// 拒絕改看 [`Db::latest_reviewer_refusals`] 的 `candidate_count == 0`。
+/// 拒絕改看 [`Db::latest_reviewer_refusals`] 的 `calls_used > 0`。
 pub const NOTHING_TO_REVIEW_HEAD: &str = "這段期間沒有還沒審過的 L2 假設";
 
 fn nonempty_lines(text: &str) -> Vec<String> {

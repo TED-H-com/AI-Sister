@@ -432,13 +432,16 @@ pub enum RefusalBucket {
     OutsideGrant,
     /// 放寬 grant 沒有用；要做只能由人在終端機看過後當場按。
     ///
-    /// 這一格只裝「目標畫面現在問得出來、但兩個 pass 沒有都指過它」
+    /// 這一格裝「目標 fact 上記了畫面編號、但兩個 pass 沒有都指過它」
     /// （[`TargetFrameGap::CitedByOnlyOnePass`] 和 [`TargetFrameGap::FrameNotCited`]）。
+    /// 問的是 fact 列上的 `frame_id`，沒有再去 `frames` 確認那一列還在。
     TargetNotOnACitedScreen,
     /// 根本沒有畫面可以核對。視窗標題／剪貼簿照設計就沒有 `frame_id`，
-    /// 矛盾列（畫面文字沒記編號）和沒記目標的也落這裡——收尾句不准
-    /// 把這一格講成「照設計」。
+    /// 矛盾列（畫面文字沒記編號）也落這裡——收尾句不准把這一格講成「照設計」。
     TargetHasNoFrameToCheck,
+    /// 這筆承諾沒有記下一步目標。切換視窗那一類照設計就沒有可比對的目標字串。
+    /// 收尾句不准把這一格講成缺畫面。
+    NoTargetRecorded,
     /// 那筆目標已經不在了（忘掉了、過了保留期，或那一列換成別的內容）。
     TargetNoLongerThere,
     /// 這筆承諾記在加「兩個 pass 都要指過畫面」這道檢查之前，問不出來。
@@ -471,9 +474,8 @@ impl RefusalReason {
                 TargetFrameGap::FrameNotCited | TargetFrameGap::CitedByOnlyOnePass => {
                     RefusalBucket::TargetNotOnACitedScreen
                 }
-                TargetFrameGap::FrameNotRecorded | TargetFrameGap::NoTargetRecorded => {
-                    RefusalBucket::TargetHasNoFrameToCheck
-                }
+                TargetFrameGap::FrameNotRecorded => RefusalBucket::TargetHasNoFrameToCheck,
+                TargetFrameGap::NoTargetRecorded => RefusalBucket::NoTargetRecorded,
                 TargetFrameGap::Forgotten | TargetFrameGap::RowReplaced => {
                     RefusalBucket::TargetNoLongerThere
                 }
@@ -978,9 +980,8 @@ mod tests {
                     TargetFrameGap::FrameNotCited | TargetFrameGap::CitedByOnlyOnePass => {
                         RefusalBucket::TargetNotOnACitedScreen
                     }
-                    TargetFrameGap::FrameNotRecorded | TargetFrameGap::NoTargetRecorded => {
-                        RefusalBucket::TargetHasNoFrameToCheck
-                    }
+                    TargetFrameGap::FrameNotRecorded => RefusalBucket::TargetHasNoFrameToCheck,
+                    TargetFrameGap::NoTargetRecorded => RefusalBucket::NoTargetRecorded,
                     TargetFrameGap::Forgotten | TargetFrameGap::RowReplaced => {
                         RefusalBucket::TargetNoLongerThere
                     }
@@ -1168,8 +1169,13 @@ mod tests {
             why: TargetFrameGap::Forgotten,
         };
         assert_eq!(no_frame.bucket(), RefusalBucket::TargetHasNoFrameToCheck);
-        assert_eq!(no_target.bucket(), RefusalBucket::TargetHasNoFrameToCheck);
+        assert_eq!(no_target.bucket(), RefusalBucket::NoTargetRecorded);
         assert_eq!(forgotten.bucket(), RefusalBucket::TargetNoLongerThere);
+        assert_ne!(
+            no_frame.bucket(),
+            no_target.bucket(),
+            "沒有目標不是「有目標、缺畫面」"
+        );
         assert_ne!(
             no_frame.bucket(),
             uncited.bucket(),
