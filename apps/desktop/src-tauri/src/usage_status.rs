@@ -6,11 +6,13 @@ use serde::Serialize;
 use sister_core::config::{
     UsageLocalSessionsEnabled, UsagePublicStatusEnabled, UsageResetReactionEnabled,
 };
+use sister_usage::view::{UsageSettings, board_file_unreadable, project, unreadable};
 use sister_usage::{
-    AUTO_POLL_INTERVAL_MS, ConfiguredSessionAdapter, DedupStore, HOST, LocalUsageAdapter, Measured,
-    PublicReset, RefreshReason, ResetReaction, SOURCE_ATTRIBUTION, SOURCE_LICENSE, SOURCE_NAME,
-    SOURCE_URL, STATUS_URL, ServedFrom,
+    AUTO_POLL_INTERVAL_MS, ConfiguredSessionAdapter, DedupStore, LocalUsageAdapter, RefreshReason,
+    ResetReaction, SOURCE_ATTRIBUTION,
 };
+
+pub use sister_usage::view::UsageStatusView;
 use std::path::Path;
 use std::sync::{
     Arc, Mutex,
@@ -38,67 +40,6 @@ impl Runtime {
             transition: Arc::new(Mutex::new(())),
         }
     }
-}
-
-#[derive(Clone, Serialize)]
-pub struct UsageProductView {
-    pub id: &'static str,
-    pub name: &'static str,
-    pub reset: &'static str,
-    pub event_id: Option<String>,
-    pub announced_at: Option<String>,
-    pub public_event_count: Option<u64>,
-    pub forecast_p24: Option<f64>,
-    pub forecast_p48: Option<f64>,
-    pub forecast_basis: Option<String>,
-}
-
-#[derive(Clone, Serialize)]
-pub struct LocalProductView {
-    pub id: &'static str,
-    pub name: &'static str,
-    pub observed_tokens: Option<u64>,
-    pub remaining_tokens: Option<u64>,
-    pub observed_at_unix_ms: Option<i64>,
-    pub quota_used_percent: Option<f64>,
-    pub quota_window_minutes: Option<i64>,
-    pub quota_resets_at_unix: Option<i64>,
-    pub provenance: &'static str,
-}
-
-#[derive(Clone, Serialize)]
-pub struct UsageStatusView {
-    pub generation: u64,
-    pub config_readable: bool,
-    pub enabled: Option<bool>,
-    pub reaction_enabled: Option<bool>,
-    pub local_sessions_enabled: Option<bool>,
-    pub local_sessions_dir: Option<String>,
-    pub stopped: bool,
-    pub served_from: &'static str,
-    pub fetch_error: Option<String>,
-    pub local_error: Option<String>,
-    pub local_files_read: u32,
-    pub local_files_found: u32,
-    pub local_files_capped: u32,
-    pub local_skipped_auth: u32,
-    pub local_skipped_deep: u32,
-    pub local_skipped_symlink: u32,
-    pub local_skipped_hidden: u32,
-    pub local_scan_complete: bool,
-    pub local_products: Vec<LocalProductView>,
-    pub local_unknown_reason: &'static str,
-    pub board_live: bool,
-    pub board_updated_at: Option<String>,
-    pub products: Vec<UsageProductView>,
-    pub attribution: &'static str,
-    pub source_name: &'static str,
-    pub source_url: &'static str,
-    pub license: &'static str,
-    pub endpoint: &'static str,
-    pub host: &'static str,
-    pub last_success_unix_ms: Option<i64>,
-    pub config_error: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -150,6 +91,7 @@ pub fn read_view(runtime: &Runtime, data_dir: Option<&Path>, stopped: bool) -> U
         }
     };
     let usage = config.shell.usage;
+    let settings = usage_settings(&usage);
     let local = ConfiguredSessionAdapter::from_config(
         usage.local_sessions_enabled,
         &usage.local_sessions_dir,
@@ -159,7 +101,7 @@ pub fn read_view(runtime: &Runtime, data_dir: Option<&Path>, stopped: bool) -> U
         return board_file_unreadable(
             generation,
             stopped,
-            &usage,
+            &settings,
             local,
             sister_usage::usage_data_dir_missing_message(),
         );
@@ -170,7 +112,7 @@ pub fn read_view(runtime: &Runtime, data_dir: Option<&Path>, stopped: bool) -> U
             return board_file_unreadable(
                 generation,
                 stopped,
-                &usage,
+                &settings,
                 local,
                 sister_usage::usage_store_unreadable_message(),
             );
@@ -182,7 +124,7 @@ pub fn read_view(runtime: &Runtime, data_dir: Option<&Path>, stopped: bool) -> U
         true,
         None,
         stopped,
-        &usage,
+        &settings,
         &store,
         local,
         recalled.served_from,
@@ -229,12 +171,13 @@ pub fn refresh_blocking(
         }
     };
     let usage = config.shell.usage;
+    let settings = usage_settings(&usage);
     let Some(dir) = data_dir else {
         return Ok((
             board_file_unreadable(
                 runtime.generation.load(Ordering::Acquire),
                 stopped,
-                &usage,
+                &settings,
                 scan_configured(&usage),
                 sister_usage::usage_data_dir_missing_message(),
             ),
@@ -248,7 +191,7 @@ pub fn refresh_blocking(
                 board_file_unreadable(
                     runtime.generation.load(Ordering::Acquire),
                     stopped,
-                    &usage,
+                    &settings,
                     scan_configured(&usage),
                     sister_usage::usage_store_unreadable_message(),
                 ),
@@ -330,7 +273,7 @@ pub fn refresh_blocking(
                 true,
                 Some(sister_usage::usage_store_unwritable_message().to_owned()),
                 stopped,
-                &usage,
+                &settings,
                 &store,
                 outcome.view.local_report.clone(),
                 outcome.view.served_from,
@@ -361,7 +304,7 @@ pub fn refresh_blocking(
             true,
             None,
             stopped,
-            &usage,
+            &settings,
             &store,
             outcome.view.local_report,
             outcome.view.served_from,
@@ -411,201 +354,16 @@ pub fn set_from_page(
     .map_err(|error| format!("{error:#}"))
 }
 
+fn usage_settings(usage: &sister_core::config::UsageConfig) -> UsageSettings {
+    UsageSettings {
+        public_status_enabled: usage.public_status_enabled,
+        reset_reaction: usage.reset_reaction,
+        local_sessions_enabled: usage.local_sessions_enabled,
+        local_sessions_dir: usage.local_sessions_dir.clone(),
+    }
+}
+
 fn scan_configured(usage: &sister_core::config::UsageConfig) -> sister_usage::LocalUsageReport {
     ConfiguredSessionAdapter::from_config(usage.local_sessions_enabled, &usage.local_sessions_dir)
         .report()
-}
-
-fn board_file_unreadable(
-    generation: u64,
-    stopped: bool,
-    usage: &sister_core::config::UsageConfig,
-    local: sister_usage::LocalUsageReport,
-    error: &str,
-) -> UsageStatusView {
-    project(
-        generation,
-        true,
-        Some(error.to_owned()),
-        stopped,
-        usage,
-        &DedupStore::empty(),
-        local,
-        ServedFrom::UnreadableStore,
-        None,
-        None,
-        false,
-    )
-}
-
-fn unreadable(generation: u64, stopped: bool, error: &str) -> UsageStatusView {
-    UsageStatusView {
-        generation,
-        config_readable: false,
-        enabled: None,
-        reaction_enabled: None,
-        local_sessions_enabled: None,
-        local_sessions_dir: None,
-        stopped,
-        served_from: "unreadable",
-        fetch_error: None,
-        local_error: None,
-        local_files_read: 0,
-        local_files_found: 0,
-        local_files_capped: 0,
-        local_skipped_auth: 0,
-        local_skipped_deep: 0,
-        local_skipped_symlink: 0,
-        local_skipped_hidden: 0,
-        local_scan_complete: true,
-        local_products: Vec::new(),
-        local_unknown_reason: "剩餘 token 未知。",
-        board_live: false,
-        board_updated_at: None,
-        products: Vec::new(),
-        attribution: SOURCE_ATTRIBUTION,
-        source_name: SOURCE_NAME,
-        source_url: SOURCE_URL,
-        license: SOURCE_LICENSE,
-        endpoint: STATUS_URL,
-        host: HOST,
-        last_success_unix_ms: None,
-        config_error: Some(error.to_owned()),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn project(
-    generation: u64,
-    config_readable: bool,
-    config_error: Option<String>,
-    stopped: bool,
-    usage: &sister_core::config::UsageConfig,
-    store: &DedupStore,
-    local: sister_usage::LocalUsageReport,
-    served_from: ServedFrom,
-    fetch_error: Option<String>,
-    board: Option<sister_usage::PublicBoard>,
-    board_live: bool,
-) -> UsageStatusView {
-    let local_products = local
-        .products
-        .iter()
-        .map(|row| LocalProductView {
-            id: row.product.as_str(),
-            name: row.product.display_name(),
-            observed_tokens: match row.observed_tokens {
-                Measured::Unknown => None,
-                Measured::Observed(amount) => Some(amount.get()),
-            },
-            remaining_tokens: match row.remaining_tokens {
-                Measured::Unknown => None,
-                Measured::Observed(amount) => Some(amount.get()),
-            },
-            observed_at_unix_ms: row.observed_at_unix_ms,
-            quota_used_percent: match &row.quota {
-                Measured::Observed(snapshot) => Some(snapshot.used_percent),
-                Measured::Unknown => None,
-            },
-            quota_window_minutes: match &row.quota {
-                Measured::Observed(snapshot) => snapshot.window_minutes,
-                Measured::Unknown => None,
-            },
-            quota_resets_at_unix: match &row.quota {
-                Measured::Observed(snapshot) => snapshot.resets_at_unix,
-                Measured::Unknown => None,
-            },
-            provenance: row.provenance,
-        })
-        .collect();
-    let products = board
-        .as_ref()
-        .map(|board| {
-            board
-                .products
-                .iter()
-                .map(|row| {
-                    let (reset, event_id, announced_at) = match &row.reset {
-                        PublicReset::NoneRecorded => ("none", None, None),
-                        PublicReset::Unverified {
-                            event_id,
-                            announced_at,
-                        } => (
-                            "unverified",
-                            Some(event_id.clone()),
-                            Some(announced_at.clone()),
-                        ),
-                        PublicReset::OtherKind {
-                            event_id,
-                            announced_at,
-                            ..
-                        } => ("other", Some(event_id.clone()), Some(announced_at.clone())),
-                        PublicReset::Confirmed(event) => (
-                            "confirmed",
-                            Some(event.event_id.clone()),
-                            Some(event.announced_at.clone()),
-                        ),
-                    };
-                    UsageProductView {
-                        id: row.product.as_str(),
-                        name: row.product.display_name(),
-                        reset,
-                        event_id,
-                        announced_at,
-                        public_event_count: row.public_event_count,
-                        forecast_p24: row.forecast.as_ref().map(|forecast| forecast.p24),
-                        forecast_p48: row.forecast.as_ref().map(|forecast| forecast.p48),
-                        forecast_basis: row
-                            .forecast
-                            .as_ref()
-                            .map(|forecast| forecast.basis.clone()),
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    UsageStatusView {
-        generation,
-        config_readable,
-        enabled: Some(usage.public_status_enabled),
-        reaction_enabled: Some(usage.reset_reaction),
-        local_sessions_enabled: Some(usage.local_sessions_enabled),
-        local_sessions_dir: Some(usage.local_sessions_dir.clone()),
-        stopped,
-        served_from: served_word(served_from),
-        fetch_error,
-        local_error: local.error,
-        local_files_read: local.files_read,
-        local_files_found: local.files_found,
-        local_files_capped: local.files_capped,
-        local_skipped_auth: local.skipped_auth_files,
-        local_skipped_deep: local.files_skipped_deep,
-        local_skipped_symlink: local.files_skipped_symlink,
-        local_skipped_hidden: local.files_skipped_hidden,
-        local_scan_complete: local.scan_complete,
-        local_products,
-        local_unknown_reason: "剩餘 token 未知。",
-        board_live,
-        board_updated_at: board.as_ref().map(|board| board.updated_at.clone()),
-        products,
-        attribution: SOURCE_ATTRIBUTION,
-        source_name: SOURCE_NAME,
-        source_url: SOURCE_URL,
-        license: SOURCE_LICENSE,
-        endpoint: STATUS_URL,
-        host: HOST,
-        last_success_unix_ms: store.last_success_unix_ms,
-        config_error,
-    }
-}
-
-fn served_word(served: ServedFrom) -> &'static str {
-    match served {
-        ServedFrom::Disabled => "disabled",
-        ServedFrom::Stopped => "stopped",
-        ServedFrom::CooldownCache => "cache",
-        ServedFrom::Network => "network",
-        ServedFrom::NetworkErrorKeptPrevious => "network-error",
-        ServedFrom::UnreadableStore => "unreadable",
-    }
 }

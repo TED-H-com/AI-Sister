@@ -10,6 +10,7 @@ mod model;
 mod parse;
 mod policy;
 mod sessions;
+pub mod view;
 
 #[cfg(feature = "public-status")]
 mod native;

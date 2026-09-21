@@ -2298,6 +2298,98 @@ console.log("㉚ᶠ Azure write 飛行中收到 changed event，完成後必須�
   check("補讀完成後控制恢復", p.node("[data-azure-enabled]").disabled === false);
 }
 
+function failAzurePaintThatClaimsNoRequest(stateEl) {
+  const original = Object.getOwnPropertyDescriptor(stateEl, "textContent");
+  Object.defineProperty(stateEl, "textContent", {
+    configurable: true,
+    get() {
+      return original.get.call(stateEl);
+    },
+    set(value) {
+      original.set.call(stateEl, value);
+      if (String(value).includes("沒有送出 request")) {
+        throw new Error("paintAzureTts threw inside refresh catch");
+      }
+    },
+  });
+}
+
+console.log("㉚ᵍ 金鑰保存或刪除失敗、而且重讀自己也丟例外時，不能改口成沒有送出 request");
+{
+  // Node 15+ 會把沒人接的 rejection 直接殺掉行程。重讀例外穿出 save/delete
+  // 時，要先讓這支測試讀到畫面上的那一句，再由斷言判紅。
+  const rejections = [];
+  const noteRejection = (reason) => {
+    rejections.push(reason);
+  };
+  process.on("unhandledRejection", noteRejection);
+  try {
+    const secret = "0123456789abcdef0123456789abcdef";
+    let failRead = false;
+    const saved = await open({
+      azure: { ...AZURE_READY, credential: "missing", ready: false },
+      onAzureRead: (state) => {
+        if (failRead) throw new Error("status read blew up");
+        return state;
+      },
+      onAzureKeySet: () => {
+        throw new Error("credential store refused");
+      },
+    });
+    failRead = true;
+    failAzurePaintThatClaimsNoRequest(saved.node("[data-azure-state]"));
+    saved.node("[data-azure-key]").value = secret;
+    await saved.act("[data-azure-key]", { event: "input" });
+    const clickedSave = await saved.act("[data-azure-key-save]");
+    await tick();
+    const saveText = saved.node("[data-azure-state]").textContent;
+    check(
+      "前提：金鑰保存鍵按得到且 request 有送出",
+      clickedSave === true && calls(saved, "azure_tts_key_set").length === 1,
+    );
+    check(
+      "存檔失敗而且重讀自己也丟例外時，最後一句是金鑰沒有保存",
+      saveText === "金鑰沒有保存：credential store refused" &&
+        !saveText.includes("沒有送出 request"),
+      saveText,
+    );
+
+    failRead = false;
+    const deleted = await open({
+      azure: AZURE_READY,
+      onAzureRead: (state) => {
+        if (failRead) throw new Error("status read blew up");
+        return state;
+      },
+      onAzureKeyDelete: () => {
+        throw new Error("credential delete refused");
+      },
+    });
+    failRead = true;
+    failAzurePaintThatClaimsNoRequest(deleted.node("[data-azure-state]"));
+    const clickedDelete = await deleted.act("[data-azure-key-delete]");
+    await tick();
+    const deleteText = deleted.node("[data-azure-state]").textContent;
+    check(
+      "前提：金鑰刪除鍵按得到且 request 有送出",
+      clickedDelete === true && calls(deleted, "azure_tts_key_delete").length === 1,
+    );
+    check(
+      "刪除失敗而且重讀自己也丟例外時，最後一句是金鑰沒有刪掉",
+      deleteText === "金鑰沒有刪掉：credential delete refused" &&
+        !deleteText.includes("沒有送出 request"),
+      deleteText,
+    );
+    check(
+      "這兩次重讀例外都留在函式裡",
+      rejections.length === 0,
+      rejections.map((reason) => String(reason?.message ?? reason)),
+    );
+  } finally {
+    process.off("unhandledRejection", noteRejection);
+  }
+}
+
 console.log("㉛ 能力報告的 Unknown 不會被畫成可用或不可用");
 {
   const available = await open();

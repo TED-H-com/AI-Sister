@@ -1830,7 +1830,12 @@ async function saveAzureTtsKey(event) {
       else paintAzureTts(azureTtsStatus);
       return;
     }
-    await refreshAzureTts();
+    try {
+      await refreshAzureTts();
+    } catch {
+      // 重讀的 catch 裡若 paintAzureTts 再丟，例外會穿出 refreshAzureTts。
+      // 這次保存 request 已經送出而且失敗了，畫面不能停在「沒有送出 request」。
+    }
     paintAzureTts(azureTtsStatus, `金鑰沒有保存：${String(err?.message ?? err)}`);
     return;
   }
@@ -1857,7 +1862,12 @@ async function deleteAzureTtsKey(event) {
       else paintAzureTts(azureTtsStatus);
       return;
     }
-    await refreshAzureTts();
+    try {
+      await refreshAzureTts();
+    } catch {
+      // 重讀的 catch 裡若 paintAzureTts 再丟，例外會穿出 refreshAzureTts。
+      // 這次刪除 request 已經送出而且失敗了，畫面不能停在「沒有送出 request」。
+    }
     paintAzureTts(azureTtsStatus, `金鑰沒有刪掉：${String(err?.message ?? err)}`);
     return;
   }
