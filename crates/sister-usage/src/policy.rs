@@ -1118,6 +1118,27 @@ mod tests {
     }
 
     #[test]
+    fn recall_stored_success_is_served_from_cache_not_network() {
+        let mut store = DedupStore::empty();
+        let now = 1_757_644_836_000;
+        let fetched = refresh_board(
+            &FakeTransport::body(&confirmed_board()),
+            &mut store,
+            &UnavailableLocalUsage,
+            request(RefreshReason::Enable, true, now),
+            || false,
+        );
+        assert_eq!(fetched.view.served_from, ServedFrom::Network);
+        assert_eq!(store.last_success_unix_ms, Some(now));
+        let recalled = recall_stored_board(&store, true, false);
+        assert_eq!(recalled.served_from, ServedFrom::CooldownCache);
+        assert_ne!(recalled.served_from, ServedFrom::Network);
+        assert!(recalled.board.is_some());
+        assert!(recalled.fetch_error.is_none());
+        assert!(recalled.board_is_live);
+    }
+
+    #[test]
     fn settings_save_sends_baseline_reason_only_when_turning_on() {
         assert_eq!(
             refresh_reason_for_settings_save(false),

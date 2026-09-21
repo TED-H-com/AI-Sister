@@ -1572,11 +1572,14 @@ async function setLocalTtsConfig(event) {
   el.localTtsEnabled.disabled = true;
   const enabled = el.localTtsEnabled.checked === true;
   const revision = ++localTtsRevision;
+  let status;
   try {
-    const status = await invoke("local_tts_config_set", { enabled });
-    if (revision === localTtsRevision) paintLocalTts(status);
+    try {
+      status = await invoke("local_tts_config_set", { enabled });
+    } finally {
+      localTtsBusy = false;
+    }
   } catch (err) {
-    localTtsBusy = false;
     if (revision !== localTtsRevision) {
       if (localTtsRefreshQueued) await refreshLocalTts();
       else paintLocalTts(localTtsStatus);
@@ -1590,7 +1593,11 @@ async function setLocalTtsConfig(event) {
     paintLocalTts(localTtsStatus, "本機台灣語音設定沒有保存。");
     return;
   }
-  localTtsBusy = false;
+  try {
+    if (revision === localTtsRevision) paintLocalTts(status);
+  } catch {
+    // 保存已經完成。重畫失敗不改口成沒有保存。
+  }
   if (localTtsRefreshQueued) {
     await refreshLocalTts();
   } else {
@@ -1957,9 +1964,21 @@ function paintUsage(raw, actionError = "") {
       const stamp = previousBoardStamp(raw);
       message += stamp ? `。底下列的是上一份（${stamp}）。` : "。底下列的是上一份。";
     }
-  } else if (raw.board_live) {
+  } else if (raw.board_live && raw.served_from === "network") {
     el.usageState.classList.add("ok");
     message = "已讀到公開看板，這是即時結果。這是全球產品公告，不是你的帳號重置證明。";
+    if (
+      Array.isArray(raw.products) &&
+      raw.products.length > 0 &&
+      raw.products.every((product) => product?.reset === "none")
+    ) {
+      message += "看板上沒有已驗證重置事件。";
+    }
+  } else if (raw.board_live && raw.served_from === "cache") {
+    const stamp = formatUtcStamp(raw.last_success_unix_ms);
+    message = stamp
+      ? `公開看板的查到時間是 ${stamp}，這次沒有送出 GET。這是全球產品公告，不是你的帳號重置證明。`
+      : "公開看板查到過，但沒有記下時間。這是全球產品公告，不是你的帳號重置證明。";
     if (
       Array.isArray(raw.products) &&
       raw.products.length > 0 &&

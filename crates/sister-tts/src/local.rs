@@ -1180,6 +1180,18 @@ mod tests {
         )
     }
 
+    fn health_response(body: Vec<u8>) -> LocalTransportResponse {
+        LocalTransportResponse::new(
+            200,
+            Some("application/json".to_owned()),
+            None,
+            None,
+            Some(body.len() as u64),
+            None,
+            body,
+        )
+    }
+
     #[test]
     fn authority_is_the_exact_loopback_service() {
         assert_eq!(LOCAL_HOST, Ipv4Addr::new(127, 0, 0, 1));
@@ -1373,6 +1385,27 @@ mod tests {
         assert_eq!(
             health_with_transport(&fake).unwrap(),
             LocalServiceStatus::NotReady
+        );
+        let warming_again = br#"{"ok":true,"ready":false}"#.to_vec();
+        let warming_observed =
+            observe_health(&FakeTransport::returning(health_response(warming_again))).unwrap();
+        assert_eq!(
+            (warming_observed.ok, warming_observed.ready),
+            (Some(true), Some(false))
+        );
+
+        let swapped_body = br#"{"ok":false,"ready":true}"#.to_vec();
+        let swapped_fake = FakeTransport::returning(health_response(swapped_body.clone()));
+        assert_eq!(
+            health_with_transport(&swapped_fake).unwrap(),
+            LocalServiceStatus::NotReady
+        );
+        let swapped_observed =
+            observe_health(&FakeTransport::returning(health_response(swapped_body))).unwrap();
+        assert_eq!(swapped_observed.status, LocalServiceStatus::NotReady);
+        assert_eq!(
+            (swapped_observed.ok, swapped_observed.ready),
+            (Some(false), Some(true))
         );
     }
 

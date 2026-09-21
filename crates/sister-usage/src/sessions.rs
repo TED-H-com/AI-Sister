@@ -106,15 +106,19 @@ fn read_configured_root(root: &Path) -> Result<LocalUsageReport> {
     let unread = files.len().saturating_sub(files_read as usize) as u32;
     let files_capped = files_capped.saturating_add(unread.saturating_sub(files_skipped_large));
     // Auth files are refused on purpose. They stay out of `scan_complete` and
-    // are reported on their own counter. Depth, symlink, and dot-prefix skips
-    // can hide a session file, so those make the scan partial.
+    // are reported on their own counter. Depth and symlink skips can hide a
+    // session file, so those make the scan partial. Dot-prefixed names are
+    // never opened. Only a dot-prefixed directory (not entered) or a
+    // dot-prefixed `.jsonl` file can hide a session, so only those clear
+    // `scan_complete`. Any other dot-prefixed file is still not read and still
+    // counted, and does not by itself make the scan partial.
     let scan_complete = files_capped == 0
         && files_skipped_large == 0
         && truncated_lines == 0
         && !hit_byte_cap
         && skips.deep == 0
         && skips.symlink == 0
-        && skips.hidden == 0;
+        && skips.hidden_maybe_session == 0;
 
     Ok(LocalUsageReport {
         enabled: true,
@@ -141,6 +145,8 @@ struct WalkSkips {
     deep: u32,
     symlink: u32,
     hidden: u32,
+    /// Dot directories and dot `.jsonl` files. Other dot files stay in `hidden` only.
+    hidden_maybe_session: u32,
 }
 
 struct FoundFile {
@@ -166,6 +172,13 @@ fn collect_jsonl(
         let name = name.to_string_lossy();
         if name.starts_with('.') {
             skips.hidden = skips.hidden.saturating_add(1);
+            let might_hide_session = match entry.file_type() {
+                Ok(kind) => kind.is_dir() || name.ends_with(".jsonl"),
+                Err(_) => true,
+            };
+            if might_hide_session {
+                skips.hidden_maybe_session = skips.hidden_maybe_session.saturating_add(1);
+            }
             continue;
         }
         if is_auth_name(&name) {
@@ -1079,6 +1092,111 @@ mod tests {
         assert_eq!(report.files_skipped_hidden, 1);
         assert!(!report.scan_complete);
         assert!(report.products.is_empty());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn hidden_directory_makes_the_scan_partial() {
+        let dir = scratch();
+        write(
+            &dir,
+            "visible.jsonl",
+            &format!("{}\n", codex_event(15, 15, "3")),
+        );
+        let hidden = dir.join(".cache");
+        fs::create_dir(&hidden).unwrap();
+        fs::write(
+            hidden.join("session.jsonl"),
+            format!("{}\n", codex_event(88, 88, "9")),
+        )
+        .unwrap();
+        let report = read_sessions(LocalReadRequest {
+            enabled: true,
+            root: Some(&dir),
+        });
+        assert!(!report.scan_complete);
+        assert_eq!(report.files_skipped_hidden, 1);
+        assert_eq!(
+            report.products[0].observed_tokens,
+            Measured::Observed(UsageAmount::new(15))
+        );
+        assert_ne!(
+            report.products[0].observed_tokens,
+            Measured::Observed(UsageAmount::new(88))
+        );
+        assert_ne!(
+            report.products[0].observed_tokens,
+            Measured::Observed(UsageAmount::new(103))
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn dot_jsonl_file_makes_the_scan_partial() {
+        let dir = scratch();
+        write(
+            &dir,
+            "visible.jsonl",
+            &format!("{}\n", codex_event(15, 15, "3")),
+        );
+        write(
+            &dir,
+            ".hidden.jsonl",
+            &format!("{}\n", codex_event(64, 64, "8")),
+        );
+        let report = read_sessions(LocalReadRequest {
+            enabled: true,
+            root: Some(&dir),
+        });
+        assert!(!report.scan_complete);
+        assert_eq!(report.files_skipped_hidden, 1);
+        assert_eq!(
+            report.products[0].observed_tokens,
+            Measured::Observed(UsageAmount::new(15))
+        );
+        assert_ne!(
+            report.products[0].observed_tokens,
+            Measured::Observed(UsageAmount::new(64))
+        );
+        assert_ne!(
+            report.products[0].observed_tokens,
+            Measured::Observed(UsageAmount::new(79))
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn dot_credentials_file_stays_unread_without_making_the_scan_partial() {
+        let dir = scratch();
+        write(
+            &dir,
+            "session.jsonl",
+            &format!("{}\n", codex_event(15, 15, "3")),
+        );
+        write(
+            &dir,
+            ".credentials.json",
+            &format!("{}\n", codex_event(99999, 99999, "99")),
+        );
+        let report = read_sessions(LocalReadRequest {
+            enabled: true,
+            root: Some(&dir),
+        });
+        assert!(report.scan_complete);
+        assert_eq!(report.files_skipped_hidden, 1);
+        assert_eq!(report.files_read, 1);
+        assert_eq!(
+            report.products[0].observed_tokens,
+            Measured::Observed(UsageAmount::new(15))
+        );
+        assert_ne!(
+            report.products[0].observed_tokens,
+            Measured::Observed(UsageAmount::new(99999))
+        );
+        assert_ne!(
+            report.products[0].observed_tokens,
+            Measured::Observed(UsageAmount::new(100014))
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
