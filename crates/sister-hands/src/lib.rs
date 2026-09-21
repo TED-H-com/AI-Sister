@@ -459,13 +459,17 @@ define_gaps! { UrlOriginGap {
     NoTrustedRecordedUrls,
     /// 那一串字讀不出一個站名，所以連要和哪個已留存 host 對照都問不出口。
     NotAReadableSite,
+    /// 這個站去過，但紀錄裡沒有這一條路徑。同站不同頁不能借 host 當授權。
+    PathNotInHerRecord,
+    /// 路徑對得上，但 query／fragment 不是紀錄裡那一條去處。
+    DestinationNotTheRecordedOne,
 }}
 
 impl UrlOriginGap {
     /// 無人值守時，這一步為什麼沒有開那個網址。**只有這裡寫。**
     ///
-    /// `host` 只有 [`Self::NotInHerRecord`] 用得到；其他四種給不給都一樣，
-    /// 因為它們講的不是「哪一個站」而是「我為什麼答不出來」。
+    /// `host` 給 [`Self::NotInHerRecord`] 和 [`Self::PathNotInHerRecord`] 用；
+    /// 其他種給不給都一樣，因為它們講的不是「哪一個站」。
     pub fn unattended_message(&self, host: Option<&str>, answer_cmd: Option<&str>) -> String {
         match self {
             Self::NotAskedYet => {
@@ -504,6 +508,20 @@ impl UrlOriginGap {
             Self::NotAReadableSite => {
                 "你說過我可以自己按網址，條件是我要說得出它從哪來。而這一串字我讀不出一個站名，\
                  所以我連要拿哪個 host 和留下的紀錄對照都問不出口。"
+                    .to_string()
+            }
+            Self::PathNotInHerRecord => match host {
+                Some(host) => format!(
+                    "你說過我可以自己按網址，條件是我要說得出它從哪來。這個站（{host}）\
+                     我去過，但不是這一頁——紀錄裡沒有這一條路徑，所以票跑不動它。"
+                ),
+                None => "你說過我可以自己按網址，條件是我要說得出它從哪來。這個站\
+                         我去過，但不是這一頁——紀錄裡沒有這一條路徑，所以票跑不動它。"
+                    .to_string(),
+            },
+            Self::DestinationNotTheRecordedOne => {
+                "你說過我可以自己按網址，條件是我要說得出它從哪來。這一頁的路徑我記過，\
+                 但 query 或 fragment 不是紀錄裡那一條去處，所以票跑不動它。要開請你當場看過再按。"
                     .to_string()
             }
         }
@@ -669,7 +687,9 @@ impl RefusalReason {
                 UrlOriginGap::YouSaidPressItYourself
                 | UrlOriginGap::NotInHerRecord
                 | UrlOriginGap::NoTrustedRecordedUrls
-                | UrlOriginGap::NotAReadableSite => RefusalBucket::UrlOriginUnknown,
+                | UrlOriginGap::NotAReadableSite
+                | UrlOriginGap::PathNotInHerRecord
+                | UrlOriginGap::DestinationNotTheRecordedOne => RefusalBucket::UrlOriginUnknown,
             },
             Self::NeverInherited { .. } => RefusalBucket::NeverInheritsTaskGrant,
             Self::NeedsLivePress { .. } => RefusalBucket::NeedsALivePressThisRun,
@@ -1305,7 +1325,9 @@ mod tests {
                     UrlOriginGap::YouSaidPressItYourself
                     | UrlOriginGap::NotInHerRecord
                     | UrlOriginGap::NoTrustedRecordedUrls
-                    | UrlOriginGap::NotAReadableSite => RefusalBucket::UrlOriginUnknown,
+                    | UrlOriginGap::NotAReadableSite
+                    | UrlOriginGap::PathNotInHerRecord
+                    | UrlOriginGap::DestinationNotTheRecordedOne => RefusalBucket::UrlOriginUnknown,
                 },
             }
         }
@@ -1371,18 +1393,23 @@ mod tests {
         );
     }
 
-    /// 五種不開網址的理由，五句不同的話。合併任何兩種，這一條要紅。
+    /// 每種不開網址的理由各一句不同的話。合併任何兩種，這一條要紅。
     ///
     /// 最要緊的是 `NotAskedYet` 和 `YouSaidPressItYourself`：一個是「我還沒問」，
     /// 一個是「你說了不要」。它們印成同一句的那天，一個從來沒被問過的人會以為
     /// 這是他自己選的——這個設定就自己犯了它要修的那顆「兩種 0」。
+    /// 同站不同路徑也不可以講成「這個站找不到」。
     #[test]
     fn each_url_origin_gap_has_its_own_refusal_message() {
         let msgs: Vec<String> = UrlOriginGap::ALL
             .iter()
             .map(|why| RefusalReason::UnattendedUrlOriginUnknown { why: *why }.message())
             .collect();
-        assert_eq!(msgs.len(), 5, "UrlOriginGap::ALL 沒有餵到五種");
+        assert_eq!(
+            msgs.len(),
+            UrlOriginGap::COUNT,
+            "UrlOriginGap::ALL 沒有餵到每種"
+        );
         for (i, a) in msgs.iter().enumerate() {
             for (j, b) in msgs.iter().enumerate() {
                 if i != j {
@@ -1399,6 +1426,25 @@ mod tests {
         assert!(
             !he_answered.contains("還沒問"),
             "他已經答過了，這一句不可以說我還沒問：{he_answered}"
+        );
+        let other_path = &msgs[UrlOriginGap::PathNotInHerRecord.index()];
+        let other_site = &msgs[UrlOriginGap::NotInHerRecord.index()];
+        assert!(
+            other_path.contains("不是這一頁"),
+            "同站不同路徑要說得出不是這一頁：{other_path}"
+        );
+        assert!(
+            !other_path.contains("找不到"),
+            "去過這個站卻沒去過這一頁，不可以講成找不到：{other_path}"
+        );
+        assert!(
+            other_site.contains("找不到"),
+            "沒去過這個站那一句仍要說找不到：{other_site}"
+        );
+        let redirect = &msgs[UrlOriginGap::DestinationNotTheRecordedOne.index()];
+        assert!(
+            redirect.contains("query") && redirect.contains("當場"),
+            "參數不是紀錄裡那一條去處時，要說得出票跑不動、當場按可以：{redirect}"
         );
     }
 

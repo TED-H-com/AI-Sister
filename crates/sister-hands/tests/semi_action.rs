@@ -187,6 +187,14 @@ fn a_covered_url_cannot_mint_a_permit_when_policy_refuses_it() {
             sister_hands::UrlOriginGap::NotInHerRecord,
         ),
         (
+            UrlOrigin::SameSiteDifferentPath,
+            sister_hands::UrlOriginGap::PathNotInHerRecord,
+        ),
+        (
+            UrlOrigin::SamePathDifferentDestination,
+            sister_hands::UrlOriginGap::DestinationNotTheRecordedOne,
+        ),
+        (
             UrlOrigin::NoTrustedRecordedUrls,
             sister_hands::UrlOriginGap::NoTrustedRecordedUrls,
         ),
@@ -431,6 +439,87 @@ fn a_standing_grant_can_take_up_and_finish_a_covered_step() {
     let outcome =
         execute_approved_step(&grant(), 1_001, approval, &step, &mut executor, &suggestion);
     assert!(matches!(outcome, Outcome::Done { .. }), "{outcome:?}");
+    assert_eq!(executor.calls, 1);
+}
+
+/// 螢幕上埋的同站不同路徑，不能憑「這個站去過」鑄票。授權書未過期；
+/// 擋下來的不是時間窗。
+#[test]
+fn a_same_site_buried_path_cannot_mint_a_permit_on_an_unexpired_grant() {
+    let grant = url_grant();
+    let buried = StepRequest::new(
+        Task::new("開說明"),
+        App::new("Browser"),
+        ActionSnapshot::OpenUrl {
+            url: "https://example.com/collect".into(),
+        },
+    );
+    let failure = grant
+        .authorize_unattended(
+            &buried,
+            1_001,
+            UrlOpenPolicy::Answered(UrlOpenAnswer::WhenYouCanNameTheOrigin),
+            |_| Ok::<_, Infallible>(UrlOrigin::SameSiteDifferentPath),
+        )
+        .err()
+        .expect("同站不同路徑不可以拿到 permit");
+    assert_eq!(
+        failure,
+        UnattendedAuthorizationFailure::UrlPolicy(sister_hands::UrlOriginGap::PathNotInHerRecord)
+    );
+    assert_ne!(
+        failure,
+        UnattendedAuthorizationFailure::Grant(GrantRejection::ExpiryElapsed)
+    );
+    let covers = grant.covers(&buried, 1_001);
+    assert!(
+        covers.is_ok(),
+        "這一條必須在授權書仍有效時失敗，失敗原因才是路徑而不是過期：{covers:?}"
+    );
+}
+
+/// 同 path 但 query 不是紀錄裡那一條去處：授權書未過期，仍鑄不出票、執行器 0 次。
+/// 當場按同一條網址仍然會執行。
+#[test]
+fn a_different_query_on_the_recorded_path_cannot_mint_or_execute_on_a_standing_grant() {
+    let grant = url_grant();
+    let redirect = StepRequest::new(
+        Task::new("開說明"),
+        App::new("Browser"),
+        ActionSnapshot::OpenUrl {
+            url: "https://example.com/help?next=https://evil.example/collect".into(),
+        },
+    );
+    let failure = grant
+        .authorize_unattended(
+            &redirect,
+            1_001,
+            UrlOpenPolicy::Answered(UrlOpenAnswer::WhenYouCanNameTheOrigin),
+            |_| Ok::<_, Infallible>(UrlOrigin::SamePathDifferentDestination),
+        )
+        .err()
+        .expect("參數不是紀錄裡那一條去處不可以拿到 permit");
+    assert_eq!(
+        failure,
+        UnattendedAuthorizationFailure::UrlPolicy(
+            sister_hands::UrlOriginGap::DestinationNotTheRecordedOne
+        )
+    );
+    assert_ne!(
+        failure,
+        UnattendedAuthorizationFailure::Grant(GrantRejection::ExpiryElapsed)
+    );
+    assert!(grant.covers(&redirect, 1_001).is_ok());
+
+    let live = pressed(
+        r#"{"action":"open_url","url":"https://example.com/help?next=https://evil.example/collect"}"#,
+    );
+    let mut executor = CountingExecutor::default();
+    let outcome = execute_with(Level::Suggest, &mut executor, &live);
+    assert!(
+        matches!(outcome, Outcome::Done { .. }),
+        "當場按仍要放行：{outcome:?}"
+    );
     assert_eq!(executor.calls, 1);
 }
 

@@ -3069,19 +3069,23 @@ impl Db {
 
     // ---------- 題庫 ----------
 
-    /// 這個網址的**站**，在她自己的紀錄裡出現過嗎（PHASES #42）。
+    /// 這個網址的**這一頁**，能不能替無人值守 standing grant 背書（PHASES #42）。
     ///
-    /// 「沒有」有兩種，而它們要他做的事完全相反，所以這裡不回 `bool`：
+    /// 這支只服務授權票那一條路，不是一般瀏覽紀錄查詢。做完後畫面核對仍走
+    /// [`sister_hands::target_policy::same_site`]（只比 host）。這裡比
+    /// [`sister_hands::target_policy::same_destination`]（host + path + query +
+    /// fragment），因為只比 host 會讓 `/collect` 或換掉的 query 借位址列裡的
+    /// `example.com/help` 過關。
+    ///
+    /// 「沒有」有四種，而它們要他做的事完全相反，所以這裡不回 `bool`：
     ///
     /// - [`UrlOrigin::NotInHerRecord`]：可採信的錄製來源裡有 URL，只是沒有這個站。
+    /// - [`UrlOrigin::SameSiteDifferentPath`]：這個站去過，但紀錄裡沒有這一條路徑。
+    /// - [`UrlOrigin::SamePathDifferentDestination`]：路徑對得上，query／fragment 不是紀錄裡那一條。
     /// - [`UrlOrigin::NoTrustedRecordedUrls`]：沒有可排除「還在輸入」的錄製
     ///   URL。舊版 session 可能仍有 URL，但無法安全地拿來背書。
     ///
-    /// 壓成 `bool` 的那一版會把第二種講成第一種，從零證據推出「這一個站不在
-    /// 紀錄裡」。兩種零要保留。
-    ///
-    /// 比對只到 host 這一層，理由見 [`sister_hands::target_policy::host_of`]：
-    /// 她記下來的那一份是位址列的**縮寫**，逐字比對永遠不會相等。
+    /// host 仍用 [`sister_hands::target_policy::host_of`] 對位址列縮寫。
     pub fn site_in_her_record(&self, url: &str) -> Result<UrlOrigin> {
         let Some(_target) = sister_hands::target_policy::host_of(url) else {
             return Ok(UrlOrigin::NotAReadableSite);
@@ -3103,6 +3107,8 @@ impl Db {
                 AND s.platform = ?1",
         )?;
         let mut saw_any_trusted_site = false;
+        let mut saw_same_site = false;
+        let mut saw_same_path = false;
         let rows = stmt.query_map([TRUSTED_URL_ORIGIN_PLATFORM], |r| r.get::<_, String>(0))?;
         for recorded in rows {
             let recorded = recorded?;
@@ -3113,11 +3119,22 @@ impl Db {
                 continue;
             }
             saw_any_trusted_site = true;
-            if sister_hands::target_policy::same_site(&recorded, url) {
+            if sister_hands::target_policy::same_destination(&recorded, url) {
                 return Ok(UrlOrigin::InHerRecord);
             }
+            if sister_hands::target_policy::same_site(&recorded, url) {
+                if sister_hands::target_policy::same_path(&recorded, url) {
+                    saw_same_path = true;
+                } else {
+                    saw_same_site = true;
+                }
+            }
         }
-        Ok(if saw_any_trusted_site {
+        Ok(if saw_same_path {
+            UrlOrigin::SamePathDifferentDestination
+        } else if saw_same_site {
+            UrlOrigin::SameSiteDifferentPath
+        } else if saw_any_trusted_site {
             UrlOrigin::NotInHerRecord
         } else {
             UrlOrigin::NoTrustedRecordedUrls
@@ -8786,11 +8803,24 @@ mod tests {
                 .expect("查"),
             UrlOrigin::InHerRecord
         );
-        // 同一個站的別條路徑也算——比對只到 host 這一層，這是刻意的。
+        // 同一個站的別條路徑不算——那是螢幕上埋 URL 借 host 過關的那一招。
         assert_eq!(
             db.site_in_her_record("https://example.com/other")
                 .expect("查"),
-            UrlOrigin::InHerRecord
+            UrlOrigin::SameSiteDifferentPath
+        );
+        // 同一條 path、換掉 query，也不是紀錄裡那一條去處。
+        assert_eq!(
+            db.site_in_her_record("https://example.com/bill")
+                .expect("查"),
+            UrlOrigin::SamePathDifferentDestination
+        );
+        assert_eq!(
+            db.site_in_her_record(
+                "https://example.com/bill?id=7&next=https://evil.example/collect"
+            )
+            .expect("查"),
+            UrlOrigin::SamePathDifferentDestination
         );
         // 借網域的那一招不算。
         assert_eq!(
@@ -8930,9 +8960,15 @@ mod tests {
         )
         .expect("fixed URL observation");
         assert_eq!(
-            db.site_in_her_record("https://cathaybk.com/transfer")
+            db.site_in_her_record("https://cathaybk.com/account")
                 .expect("查"),
             UrlOrigin::InHerRecord
+        );
+        assert_eq!(
+            db.site_in_her_record("https://cathaybk.com/transfer")
+                .expect("查"),
+            UrlOrigin::SameSiteDifferentPath,
+            "同站不同路徑不能借 /account 那一列當 /transfer 的來源票"
         );
     }
 

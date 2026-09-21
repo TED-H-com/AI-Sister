@@ -149,15 +149,23 @@ impl UrlOpenPolicy {
 
 /// 她對「這個網址從哪來」問得出來的答案。
 ///
-/// 四種，而**後面三種都是「說不出來」**——分開是因為它們要他做的事完全不同：
-/// 換一個網址、去修擷取、還是根本沒得修。壓成一個 `bool` 的那一版會讓
+/// 五種，而**後面四種都是「說不出來」**——分開是因為它們要他做的事完全不同：
+/// 換一個站、換這一頁、去修擷取、還是根本沒得修。壓成一個 `bool` 的那一版會讓
 /// 「這一個網址可疑」和「我這條路整個沒在跑」長得一模一樣。
+///
+/// 「去過這個站」「去過這一頁」「去過這一頁但參數不同」是三種零：只比 host
+/// 的那一版，螢幕上埋的 `/collect` 或 `?next=` 會借位址列裡出現過的
+/// `example.com/help` 過關。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UrlOrigin {
-    /// 這個站在她自己的紀錄裡出現過。
+    /// 這個站的這一頁、這一組 query／fragment 在她自己的紀錄裡出現過。
     InHerRecord,
     /// 查過可採信的錄製來源，其中沒有這個站。
     NotInHerRecord,
+    /// 這個站出現過，但紀錄裡沒有這一條路徑。
+    SameSiteDifferentPath,
+    /// 路徑對得上，但 query／fragment 不是紀錄裡那一條去處。
+    SamePathDifferentDestination,
     /// 目前沒有可確認為已完成 URL、能替這一步背書的錄製來源。
     /// 舊版錄製可能仍留著 URL，但無法排除是正在輸入的半截字，所以不採信。
     NoTrustedRecordedUrls,
@@ -195,6 +203,10 @@ pub fn try_url_origin_gap<E>(
         UrlOpenPolicy::Answered(UrlOpenAnswer::WhenYouCanNameTheOrigin) => match origin(url)? {
             UrlOrigin::InHerRecord => None,
             UrlOrigin::NotInHerRecord => Some(UrlOriginGap::NotInHerRecord),
+            UrlOrigin::SameSiteDifferentPath => Some(UrlOriginGap::PathNotInHerRecord),
+            UrlOrigin::SamePathDifferentDestination => {
+                Some(UrlOriginGap::DestinationNotTheRecordedOne)
+            }
             UrlOrigin::NoTrustedRecordedUrls => Some(UrlOriginGap::NoTrustedRecordedUrls),
             UrlOrigin::NotAReadableSite => Some(UrlOriginGap::NotAReadableSite),
         },
@@ -367,11 +379,19 @@ mod tests {
         assert_eq!(asked.get(), 1, "說得出來源那條路沒有真的去查");
     }
 
-    /// 三種「說不出來」各自是一句不同的話。
+    /// 四種「說不出來」各自是一句不同的話。同站不同路徑不可以講成「沒去過這個站」。
     #[test]
     fn the_three_ways_of_not_knowing_name_different_causes() {
         let cases = [
             (UrlOrigin::NotInHerRecord, UrlOriginGap::NotInHerRecord),
+            (
+                UrlOrigin::SameSiteDifferentPath,
+                UrlOriginGap::PathNotInHerRecord,
+            ),
+            (
+                UrlOrigin::SamePathDifferentDestination,
+                UrlOriginGap::DestinationNotTheRecordedOne,
+            ),
             (
                 UrlOrigin::NoTrustedRecordedUrls,
                 UrlOriginGap::NoTrustedRecordedUrls,
@@ -399,10 +419,49 @@ mod tests {
         }
         // 「目前沒有任何網址證據」不可以讀起來像「這一個網址可疑」。
         assert!(
-            said[1].contains("沒有") && said[1].contains("錄製來源"),
+            said[3].contains("沒有") && said[3].contains("錄製來源"),
             "沒有可採信 URL 來源那一句要說清楚量到的空集合：{}",
+            said[3]
+        );
+        assert!(
+            said[1].contains("這一頁") || said[1].contains("路徑"),
+            "同站不同路徑那一句要說得出不是整站沒去過：{}",
             said[1]
         );
+        assert!(
+            !said[1].contains("找不到"),
+            "同站不同路徑不可以講成這個站找不到：{}",
+            said[1]
+        );
+        assert!(
+            said[2].contains("query") || said[2].contains("fragment"),
+            "同 path 不同參數那一句要說得出不是換頁：{}",
+            said[2]
+        );
+    }
+
+    /// 來源查詢說「路徑對、參數不對」時鑄不出票；當場按仍放行。不靠過期。
+    #[test]
+    fn a_recorded_path_with_different_query_cannot_use_the_standing_grant() {
+        let asked = Cell::new(0);
+        let gap = url_origin_gap(
+            &open("https://example.com/help?next=https://evil.example/collect"),
+            ApprovedBy::StandingGrant,
+            UrlOpenPolicy::Answered(UrlOpenAnswer::WhenYouCanNameTheOrigin),
+            |_| {
+                asked.set(asked.get() + 1);
+                UrlOrigin::SamePathDifferentDestination
+            },
+        );
+        assert_eq!(gap, Some(UrlOriginGap::DestinationNotTheRecordedOne));
+        assert_eq!(asked.get(), 1, "參數不同仍要去查來源，不能靠子字串猜");
+        let live = url_origin_gap(
+            &open("https://example.com/help?next=https://evil.example/collect"),
+            ApprovedBy::Press,
+            UrlOpenPolicy::Answered(UrlOpenAnswer::WhenYouCanNameTheOrigin),
+            never,
+        );
+        assert_eq!(live, None, "當場按仍要放行；這一格只擋票");
     }
 
     /// 不是開網址的那些步，這道閘門一個字都不該說。

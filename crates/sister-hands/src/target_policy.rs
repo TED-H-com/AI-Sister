@@ -259,6 +259,10 @@ pub fn host_of(url: &str) -> Option<String> {
 ///
 /// 兩邊都走 [`host_of`]。任何一邊講不出 host 就是 `false`——**「我看不懂」
 /// 不可以讀成「可以」**。
+///
+/// 這支**只比 host**。做完後的畫面核對（`screen_check`）也走這裡：瀏覽器
+/// 落地後路徑可能被站方改掉，那一格是憑據不是攔截。無人值守要開之前的來源
+/// 票另走 [`same_destination`]：同站不同去處不能借已記錄的 host 當授權。
 pub fn same_site(recorded: &str, target: &str) -> bool {
     fn without_one_www(host: &str) -> &str {
         host.strip_prefix("www.").unwrap_or(host)
@@ -271,6 +275,153 @@ pub fn same_site(recorded: &str, target: &str) -> bool {
         }
         _ => false,
     }
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// 解 `%XX`。解不開就 `None`——授權比對不可以把壞掉的編碼讀成「同一頁」。
+fn percent_decode(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return None;
+            }
+            let hi = hex_digit(bytes[i + 1])?;
+            let lo = hex_digit(bytes[i + 2])?;
+            out.push((hi << 4) | lo);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// 權威段之後的 path／query／fragment。`@` 只在權威段當 userinfo；
+/// path 裡的 `user@inbox` 不是第二個主機。
+fn tail_after_authority(url: &str) -> Option<&str> {
+    let _ = host_of(url)?;
+    let v = url.trim();
+    let rest = match v.split_once("://") {
+        Some((_, rest)) => rest,
+        None => v,
+    };
+    match rest.find(['/', '?', '#']) {
+        Some(i) => Some(&rest[i..]),
+        None => Some(""),
+    }
+}
+
+/// 從一個網址解析出 **path**。講不出 host 的字串這裡也講不出 path。
+///
+/// 空路徑和 `/` 都回 `"/"`。結尾的 `/` 會去掉（根路徑除外），因為位址列
+/// 有時省、有時留。percent-decode 一次之後若出現 `.` / `..` 段，回 `None`：
+/// 解了會讓 `/help/../collect` 變成已記錄的 `/collect`。
+pub fn path_of(url: &str) -> Option<String> {
+    let tail = tail_after_authority(url)?;
+    let raw = tail.split(['?', '#']).next().unwrap_or("");
+    let decoded = percent_decode(raw)?;
+    if decoded
+        .split('/')
+        .any(|segment| segment == "." || segment == "..")
+    {
+        return None;
+    }
+    if decoded.is_empty() || decoded == "/" {
+        Some("/".into())
+    } else {
+        Some(decoded.trim_end_matches('/').to_string())
+    }
+}
+
+/// 兩邊 path 是否相同。任何一邊講不出 path 就是 `false`。
+///
+/// path 區分大小寫；host 的大小寫在 [`same_site`]。
+pub fn same_path(recorded: &str, target: &str) -> bool {
+    match (path_of(recorded), path_of(target)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+fn query_and_fragment(url: &str) -> Option<(&str, &str)> {
+    let tail = tail_after_authority(url)?;
+    let (path_and_query, fragment) = match tail.split_once('#') {
+        Some((before, frag)) => (before, frag),
+        None => (tail, ""),
+    };
+    let query = match path_and_query.split_once('?') {
+        Some((_, q)) => q,
+        None => "",
+    };
+    Some((query, fragment))
+}
+
+fn percent_decode_query_component(value: &str) -> Option<String> {
+    percent_decode(&value.replace('+', " "))
+}
+
+fn canonical_query(query: &str) -> Option<Vec<(String, String)>> {
+    let mut pairs = Vec::new();
+    if query.is_empty() {
+        return Some(pairs);
+    }
+    for part in query.split('&') {
+        if part.is_empty() {
+            continue;
+        }
+        let (key, value) = part.split_once('=').unwrap_or((part, ""));
+        pairs.push((
+            percent_decode_query_component(key)?,
+            percent_decode_query_component(value)?,
+        ));
+    }
+    pairs.sort();
+    Some(pairs)
+}
+
+/// query（排序後的鍵值）與 fragment 是否相同。解不開的編碼是 `false`。
+pub fn same_query_and_fragment(recorded: &str, target: &str) -> bool {
+    match (query_and_fragment(recorded), query_and_fragment(target)) {
+        (Some((q1, f1)), Some((q2, f2))) => {
+            let Some(a) = canonical_query(q1) else {
+                return false;
+            };
+            let Some(b) = canonical_query(q2) else {
+                return false;
+            };
+            let Some(fa) = percent_decode(f1) else {
+                return false;
+            };
+            let Some(fb) = percent_decode(f2) else {
+                return false;
+            };
+            a == b && fa == fb
+        }
+        _ => false,
+    }
+}
+
+/// 無人值守 standing grant 的去處：同一站、同一條 path、同一組 query／fragment。
+///
+/// 只比 host 會讓 `/collect` 借 `example.com/help` 過關；只比 path 會讓
+/// `?id=7` 的紀錄去開 `?id=8` 或 `?next=https://evil.example`。參數解讀不出來
+/// 時是 `false`，不是「當作沒有參數」。當場按不走這支。
+pub fn same_destination(recorded: &str, target: &str) -> bool {
+    same_site(recorded, target)
+        && same_path(recorded, target)
+        && same_query_and_fragment(recorded, target)
 }
 
 #[cfg(test)]
@@ -365,6 +516,116 @@ mod tests {
             host_of("https://mail.example.com/").as_deref(),
             Some("mail.example.com")
         );
+    }
+
+    /// 位址列縮寫掉 scheme／www 之後，同一頁的 path 仍要對得上。
+    #[test]
+    fn abbreviated_and_full_urls_share_the_same_path() {
+        assert_eq!(path_of("example.com/bill?id=7").as_deref(), Some("/bill"));
+        assert_eq!(
+            path_of("https://www.example.com/bill?id=7").as_deref(),
+            Some("/bill")
+        );
+        assert!(same_path(
+            "example.com/bill?id=7",
+            "https://www.example.com/bill?id=7"
+        ));
+        assert!(same_path("example.com", "https://example.com/"));
+        assert!(same_path("example.com/a/", "https://example.com/a"));
+        assert_eq!(path_of("http://[::1]:8080/x").as_deref(), Some("/x"));
+        assert!(same_path(
+            "example.com/bill",
+            "https://example.com:443/bill"
+        ));
+        assert!(same_path(
+            "example.com/bill",
+            "https://example.com/%62%69%6C%6C"
+        ));
+        assert_eq!(path_of("https://example.com/help/../collect"), None);
+    }
+
+    /// 同站不同路徑不是同一頁。這是 #42 剩下那半：螢幕上埋的 `/collect`
+    /// 不能借位址列裡出現過的 `example.com/bill` 當來源票。
+    #[test]
+    fn a_different_path_on_the_same_site_is_not_the_same_page() {
+        assert!(same_site("example.com/bill", "https://example.com/collect"));
+        assert!(!same_path(
+            "example.com/bill",
+            "https://example.com/collect"
+        ));
+        assert!(!same_path(
+            "example.com/help",
+            "https://example.com/help/../collect"
+        ));
+        assert!(!same_path("/", "https://example.com/collect"));
+        assert_eq!(path_of("javascript:alert(1)"), None);
+        assert!(!same_path("example.com/a", "javascript:alert(1)"));
+    }
+
+    /// path 裡的 `@` 不是 userinfo。整串 `rsplit('@')` 會把 `/user@inbox` 切錯。
+    #[test]
+    fn at_sign_in_the_path_is_not_userinfo() {
+        assert_eq!(
+            host_of("https://example.com/user@inbox").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            path_of("https://example.com/user@inbox").as_deref(),
+            Some("/user@inbox")
+        );
+        assert!(same_destination(
+            "example.com/user@inbox",
+            "https://example.com/user@inbox"
+        ));
+    }
+
+    /// 壞掉的 percent-encoding 不可以 panic，也不能拿來當同一去處。
+    #[test]
+    fn malformed_percent_encoding_is_not_the_recorded_destination() {
+        let weird = "https://example.com/bill?id=%漢";
+        assert!(path_of(weird).is_some());
+        assert!(!same_query_and_fragment("example.com/bill?id=7", weird));
+        assert!(!same_destination("example.com/bill?id=7", weird));
+        assert_eq!(percent_decode("%漢"), None);
+        assert_eq!(percent_decode("%"), None);
+        assert_eq!(percent_decode("%2"), None);
+    }
+
+    /// 記過的去處包含 query／fragment。同 path 換參數不是同一張票。
+    #[test]
+    fn standing_grant_destination_includes_query_and_fragment() {
+        assert!(same_destination(
+            "example.com/bill?id=7",
+            "https://www.example.com/bill?id=7"
+        ));
+        assert!(same_destination(
+            "example.com/a?b=c&id=7",
+            "https://example.com/a?id=7&b=c"
+        ));
+        assert!(!same_destination(
+            "example.com/bill?id=7",
+            "https://example.com/bill"
+        ));
+        assert!(!same_destination(
+            "example.com/bill?id=7",
+            "https://example.com/bill?id=8"
+        ));
+        assert!(!same_destination(
+            "example.com/help",
+            "https://example.com/help?next=https://evil.example/collect"
+        ));
+        assert!(!same_destination(
+            "example.com/help",
+            "https://example.com/help?next=https%3A%2F%2Fevil.example%2Fcollect"
+        ));
+        assert!(!same_destination(
+            "example.com/help",
+            "https://example.com/help#section"
+        ));
+        assert!(same_path(
+            "example.com/help",
+            "https://example.com/help?next=https://evil.example/collect"
+        ));
     }
 
     /// IPv6 字面值不可以被冒號切成兩半。開發時整天看的 `localhost:3000` 也一樣。

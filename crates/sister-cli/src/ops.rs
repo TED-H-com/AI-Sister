@@ -8340,7 +8340,7 @@ pub mod act {
                         app_id: Some("chrome.exe".into()),
                         app_name: Some("Chrome".into()),
                         window_title: Some("位址列留下這個站".into()),
-                        // 位址列給的是縮寫過的字串，比對只到 host 這一層。
+                        // 位址列給的是縮寫過的字串；無人值守來源票要比 host+path。
                         url: Some("example.com/a?b=c".into()),
                         pid: Some(1),
                     },
@@ -8349,9 +8349,14 @@ pub mod act {
             .expect("insert focus");
 
             assert_eq!(
-                StepSource::site_in_her_record(&db, "https://www.example.com/deep/link")
+                StepSource::site_in_her_record(&db, "https://www.example.com/a?b=c")
                     .expect("查得動"),
                 sister_hands::url_policy::UrlOrigin::InHerRecord
+            );
+            assert_eq!(
+                StepSource::site_in_her_record(&db, "https://www.example.com/deep/link")
+                    .expect("查得動"),
+                sister_hands::url_policy::UrlOrigin::SameSiteDifferentPath
             );
             assert_eq!(
                 StepSource::site_in_her_record(&db, "https://elsewhere.test/x").expect("查得動"),
