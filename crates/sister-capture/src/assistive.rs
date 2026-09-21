@@ -46,6 +46,47 @@ impl TextRole {
     }
 }
 
+/// Edge HTML: Chromium often focuses a descendant Group while an ancestor
+/// Document exposes TextPattern. Production still reads through the inner
+/// Document (no TextPattern of its own) and must not let a Group skip a
+/// Document parent that has no pattern. The fixture may SetFocus that inner
+/// Document; it must not treat the outer page Document as the reader.
+#[cfg(test)]
+pub(crate) fn html_nested_reader_tree(
+    focused_is_document: bool,
+    focused_is_group: bool,
+    inner_document_lacks_text_pattern: bool,
+    ancestor_has_text_pattern: bool,
+) -> bool {
+    ancestor_has_text_pattern
+        && inner_document_lacks_text_pattern
+        && (focused_is_document || focused_is_group)
+}
+
+/// A Group whose direct Document parent has no TextPattern must not borrow
+/// an outer page provider. That is the HTML `role=group` exclusion.
+#[cfg(test)]
+pub(crate) fn group_may_use_direct_parent_document(parent_has_text_pattern: bool) -> bool {
+    parent_has_text_pattern
+}
+
+/// PDF second page: keyboard focus stays on the offscreen first-page Group.
+/// Direct-parent GetVisibleRanges is often empty after scroll. Ready when a
+/// live ancestor Document's visible ranges show the new page only.
+#[cfg(test)]
+pub(crate) fn pdf_stale_focus_shows_next_page(
+    focused_group_offscreen: bool,
+    stale_scope: &str,
+    live_ancestor_visible: &str,
+    first_page: &str,
+    second_page: &str,
+) -> bool {
+    focused_group_offscreen
+        && stale_scope.contains(first_page)
+        && live_ancestor_visible.contains(second_page)
+        && !live_ancestor_visible.contains(first_page)
+}
+
 /// Screen coordinates, including providers whose page container extends below
 /// the viewport. Every captured text rectangle must fit the current frame.
 #[derive(Clone, Copy)]
@@ -278,6 +319,56 @@ mod tests {
             Some(())
         }
     }
+    #[test]
+    fn html_reader_tree_accepts_descendant_group_when_inner_document_lacks_pattern() {
+        assert!(html_nested_reader_tree(false, true, true, true));
+        assert!(html_nested_reader_tree(true, false, true, true));
+        assert!(!html_nested_reader_tree(false, true, false, true));
+        assert!(!html_nested_reader_tree(false, true, true, false));
+        assert!(!html_nested_reader_tree(false, false, true, true));
+    }
+
+    #[test]
+    fn group_without_parent_text_pattern_must_not_borrow_outer_document() {
+        assert!(!group_may_use_direct_parent_document(false));
+        assert!(group_may_use_direct_parent_document(true));
+    }
+
+    #[test]
+    fn pdf_bottom_ready_uses_live_ancestor_visible_text_not_stale_parent() {
+        assert!(pdf_stale_focus_shows_next_page(
+            true,
+            "PDF-FIRST phone 0800-444-555",
+            "PDF-SECOND phone 02-6655-4433",
+            "PDF-FIRST",
+            "PDF-SECOND",
+        ));
+        assert!(
+            !pdf_stale_focus_shows_next_page(
+                true,
+                "PDF-FIRST phone 0800-444-555",
+                "",
+                "PDF-FIRST",
+                "PDF-SECOND",
+            ),
+            "empty visible ranges on the scrolled-off parent are not the second page"
+        );
+        assert!(!pdf_stale_focus_shows_next_page(
+            false,
+            "PDF-FIRST phone 0800-444-555",
+            "PDF-SECOND phone 02-6655-4433",
+            "PDF-FIRST",
+            "PDF-SECOND",
+        ));
+        assert!(!pdf_stale_focus_shows_next_page(
+            true,
+            "PDF-FIRST phone 0800-444-555",
+            "PDF-FIRST phone 0800-444-555|PDF-SECOND phone 02-6655-4433",
+            "PDF-FIRST",
+            "PDF-SECOND",
+        ));
+    }
+
     #[test]
     fn enclosing_visible_range_is_clipped_to_the_focused_document() {
         let page = "LEFTDOCUMENTRIGHT";

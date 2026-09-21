@@ -53,14 +53,66 @@ function Get-SisterPdfPage {
         return $null
     }
 }
-function Test-SisterHtmlDocumentFocused {
+function Get-SisterParentElement($node) {
+    if ($null -eq $node) { return $null }
+    try { return [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($node) } catch { return $null }
+}
+function Get-SisterAncestorTextDocument($from) {
+    $node = Get-SisterParentElement $from
+    for ($depth = 0; $depth -lt 8 -and $null -ne $node; $depth++) {
+        if ($node.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document -and $node.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) {
+            return $node
+        }
+        $node = Get-SisterParentElement $node
+    }
+    return $null
+}
+function Get-SisterInnerHtmlDocument($from) {
+    $node = $from
+    for ($depth = 0; $depth -lt 8 -and $null -ne $node; $depth++) {
+        if ($node.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document -and -not $node.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) {
+            return $node
+        }
+        $node = Get-SisterParentElement $node
+    }
+    return $null
+}
+function Test-SisterHtmlInnerDocumentFocused {
     $focused = Get-SisterFocusedElement
     if ($null -eq $focused) { return $false }
     try {
-        return ($focused.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document -and $focused.Current.HasKeyboardFocus)
+        if ($focused.Current.ControlType -ne [System.Windows.Automation.ControlType]::Document) { return $false }
+        if ($focused.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) { return $false }
+        return ($null -ne (Get-SisterAncestorTextDocument $focused))
     } catch {
         return $false
     }
+}
+function Invoke-SisterHtmlInnerDocumentFocus {
+    try {
+        $focused = Get-SisterFocusedElement
+        if ($null -eq $focused) { return }
+        if (Test-SisterHtmlInnerDocumentFocused) { return }
+        $inner = Get-SisterInnerHtmlDocument $focused
+        $outer = Get-SisterAncestorTextDocument $focused
+        if ($null -eq $inner -or $null -eq $outer) { return }
+        $inner.SetFocus() | Out-Null
+    } catch {}
+}
+function Get-SisterLivePdfVisible {
+    $node = Get-SisterFocusedElement
+    $found = @()
+    for ($depth = 0; $depth -lt 8 -and $null -ne $node; $depth++) {
+        try {
+            if ($node.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document -and $node.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) {
+                $pattern = $node.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+                $visible = (@($pattern.GetVisibleRanges() | ForEach-Object { $_.GetText(1024) })) -join '|'
+                $found += [pscustomobject]@{ Depth = $depth; Offscreen = [bool]$node.Current.IsOffscreen; Visible = $visible }
+            }
+        } catch {}
+        $node = Get-SisterParentElement $node
+    }
+    return $found
 }
 function Invoke-SisterViewportClick {
     param([int]$X, [int]$Y)
@@ -225,10 +277,9 @@ window.addEventListener('keydown', event => {
                     continue
                 }
             } elseif ($mode -in @('top', 'bottom') -and -not $Pdf) {
-                if (-not (Test-SisterHtmlDocumentFocused)) {
-                    [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'HTML focus is not Document; activating again')
-                    $sent = ''
-                    continue
+                if (-not (Test-SisterHtmlInnerDocumentFocused)) {
+                    [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'HTML descendant Group; focusing inner Document')
+                    Invoke-SisterHtmlInnerDocumentFocus
                 }
             }
         }
@@ -238,10 +289,13 @@ window.addEventListener('keydown', event => {
         if ($Pdf -and $mode -ne 'address') {
             [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'reading direct PDF document')
             $page = Get-SisterPdfPage
+            $ancestors = @(Get-SisterLivePdfVisible)
             if ($null -ne $page) {
                 $extra += "focused-page=[$($page.Scope)] visible=[$($page.Visible)] offscreen=$($page.Offscreen)"
+                $extra += (@($ancestors | ForEach-Object { "ancestor$($_.Depth) offscreen=$($_.Offscreen) visible=[$($_.Visible)]" }))
                 if ($mode -eq 'bottom') {
-                    $ready = $page.Offscreen -and $page.Scope.Contains('PDF-FIRST') -and $page.Visible.Contains('PDF-SECOND') -and -not $page.Visible.Contains('PDF-FIRST')
+                    $live = $ancestors | Where-Object { $_.Visible.Contains('PDF-SECOND') -and -not $_.Visible.Contains('PDF-FIRST') } | Select-Object -First 1
+                    $ready = $page.Offscreen -and $page.Scope.Contains('PDF-FIRST') -and $null -ne $live
                 } else {
                     $ready = -not $page.Offscreen -and $page.Scope.Contains('PDF-FIRST') -and $page.Visible.Contains('PDF-FIRST')
                 }
@@ -249,8 +303,11 @@ window.addEventListener('keydown', event => {
                 $extra += 'focused-page=none'
             }
         } elseif ($mode -in @('top', 'bottom')) {
-            [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'waiting for HTML Document focus')
-            $ready = (Test-SisterHtmlDocumentFocused) -and $browser.MainWindowTitle.StartsWith("Sister Edge $mode")
+            [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'waiting for HTML inner Document')
+            if (-not (Test-SisterHtmlInnerDocumentFocused)) {
+                Invoke-SisterHtmlInnerDocumentFocus
+            }
+            $ready = (Test-SisterHtmlInnerDocumentFocused) -and $browser.MainWindowTitle.StartsWith("Sister Edge $mode")
         } elseif ($Pdf -or $mode -eq 'address' -or $browser.MainWindowTitle.StartsWith("Sister Edge $mode")) {
             $ready = $true
         }

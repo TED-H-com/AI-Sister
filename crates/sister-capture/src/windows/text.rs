@@ -150,6 +150,10 @@ impl FocusedText<'_> {
         if self.role()? == TextRole::DocumentRegion {
             // PDF pages can focus a Group directly inside their text Document.
             // Never walk past that parent to a viewer that flattens hidden pages.
+            // An HTML descendant Group whose parent Document has no TextPattern
+            // also stops here: borrowing the outer page would leak sibling text
+            // and the dedicated `role=group` control. The HTML fixture SetFocus
+            // the inner Document so the nested-Document path below can run.
             unsafe {
                 let parent = self
                     .automation
