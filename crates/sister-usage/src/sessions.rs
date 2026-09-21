@@ -60,9 +60,9 @@ fn read_configured_root(root: &Path) -> Result<LocalUsageReport> {
     if !canonical.is_dir() {
         return Err(Error::LocalPathMissing);
     }
-    let mut skipped_auth = 0_u32;
+    let mut skips = WalkSkips::default();
     let mut files = Vec::new();
-    collect_jsonl(&canonical, 0, &mut files, &mut skipped_auth)?;
+    collect_jsonl(&canonical, 0, &mut files, &mut skips)?;
     files.sort_by(|a, b| b.mtime.cmp(&a.mtime).then(a.path.cmp(&b.path)));
     let files_found = files.len() as u32;
     let files_capped = files.len().saturating_sub(MAX_JSONL_FILES) as u32;
@@ -105,14 +105,25 @@ fn read_configured_root(root: &Path) -> Result<LocalUsageReport> {
     }
     let unread = files.len().saturating_sub(files_read as usize) as u32;
     let files_capped = files_capped.saturating_add(unread.saturating_sub(files_skipped_large));
-    let scan_complete =
-        files_capped == 0 && files_skipped_large == 0 && truncated_lines == 0 && !hit_byte_cap;
+    // Auth files are refused on purpose. They stay out of `scan_complete` and
+    // are reported on their own counter. Depth, symlink, and dot-prefix skips
+    // can hide a session file, so those make the scan partial.
+    let scan_complete = files_capped == 0
+        && files_skipped_large == 0
+        && truncated_lines == 0
+        && !hit_byte_cap
+        && skips.deep == 0
+        && skips.symlink == 0
+        && skips.hidden == 0;
 
     Ok(LocalUsageReport {
         enabled: true,
         configured: true,
         products,
-        skipped_auth_files: skipped_auth,
+        skipped_auth_files: skips.auth,
+        files_skipped_deep: skips.deep,
+        files_skipped_symlink: skips.symlink,
+        files_skipped_hidden: skips.hidden,
         files_found,
         files_read,
         files_skipped_large,
@@ -124,6 +135,14 @@ fn read_configured_root(root: &Path) -> Result<LocalUsageReport> {
     })
 }
 
+#[derive(Default)]
+struct WalkSkips {
+    auth: u32,
+    deep: u32,
+    symlink: u32,
+    hidden: u32,
+}
+
 struct FoundFile {
     path: PathBuf,
     mtime: u64,
@@ -133,9 +152,10 @@ fn collect_jsonl(
     dir: &Path,
     depth: u32,
     files: &mut Vec<FoundFile>,
-    skipped_auth: &mut u32,
+    skips: &mut WalkSkips,
 ) -> Result<()> {
     if depth > MAX_WALK_DEPTH {
+        skips.deep = skips.deep.saturating_add(1);
         return Ok(());
     }
     let entries = fs::read_dir(dir).map_err(|_| Error::LocalIo)?;
@@ -145,18 +165,20 @@ fn collect_jsonl(
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if name.starts_with('.') {
+            skips.hidden = skips.hidden.saturating_add(1);
             continue;
         }
         if is_auth_name(&name) {
-            *skipped_auth += 1;
+            skips.auth = skips.auth.saturating_add(1);
             continue;
         }
         let file_type = entry.file_type().map_err(|_| Error::LocalIo)?;
         if file_type.is_symlink() {
+            skips.symlink = skips.symlink.saturating_add(1);
             continue;
         }
         if file_type.is_dir() {
-            collect_jsonl(&path, depth + 1, files, skipped_auth)?;
+            collect_jsonl(&path, depth + 1, files, skips)?;
             continue;
         }
         if !name.ends_with(".jsonl") {
@@ -323,7 +345,10 @@ fn ingest_claude(value: &Value, acc: &mut ProductAcc) -> bool {
         {
             return true;
         }
-        acc.add_tokens(claude_tokens(usage), observed_at);
+        match claude_tokens(usage) {
+            TokenSum::Complete(tokens) => acc.add_tokens(Some(tokens), observed_at),
+            TokenSum::Incomplete => acc.mark_tokens_incomplete(),
+        }
         return true;
     }
     if type_name == "rate_limit_event"
@@ -360,17 +385,29 @@ fn claude_message_id(value: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn claude_tokens(usage: &Value) -> Option<u64> {
-    // Claude reports uncached input separately from cache_*; those are extra.
-    let input = as_nonneg_int(usage.get("input_tokens")).unwrap_or(0);
-    let output = as_nonneg_int(usage.get("output_tokens")).unwrap_or(0);
-    let cache_read = as_nonneg_int(usage.get("cache_read_input_tokens")).unwrap_or(0);
-    let cache_create = as_nonneg_int(usage.get("cache_creation_input_tokens")).unwrap_or(0);
-    let sum = input
-        .saturating_add(output)
-        .saturating_add(cache_read)
-        .saturating_add(cache_create);
-    (sum > 0).then_some(sum)
+enum TokenSum {
+    /// Every summed field was present. Zero is a real measurement.
+    Complete(u64),
+    /// A usage field was missing or not a non-negative integer. Not a zero.
+    Incomplete,
+}
+
+fn claude_tokens(usage: &Value) -> TokenSum {
+    // Claude reports uncached input separately from cache_*; those are extra,
+    // so a missing cache field is not a measured zero.
+    let mut sum = 0_u64;
+    for key in [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    ] {
+        match as_nonneg_int(usage.get(key)) {
+            Some(value) => sum = sum.saturating_add(value),
+            None => return TokenSum::Incomplete,
+        }
+    }
+    TokenSum::Complete(sum)
 }
 
 fn as_nonneg_int(value: Option<&Value>) -> Option<u64> {
@@ -443,6 +480,10 @@ struct ProductAcc {
     quota: Option<QuotaSnapshot>,
     message_ids: HashSet<String>,
     saw_event: bool,
+    /// A token total was present, including an explicit 0.
+    saw_token_measurement: bool,
+    /// At least one usage object omitted a field. The sum must not look finished.
+    token_fields_incomplete: bool,
 }
 
 impl ProductAcc {
@@ -457,6 +498,8 @@ impl ProductAcc {
             quota: None,
             message_ids: HashSet::new(),
             saw_event: false,
+            saw_token_measurement: false,
+            token_fields_incomplete: false,
         }
     }
 
@@ -476,12 +519,19 @@ impl ProductAcc {
             return;
         };
         self.saw_event = true;
+        self.saw_token_measurement = true;
         self.across_files = self.across_files.saturating_add(tokens);
         self.touch_time(at);
     }
 
+    fn mark_tokens_incomplete(&mut self) {
+        self.saw_event = true;
+        self.token_fields_incomplete = true;
+    }
+
     fn set_file_total(&mut self, tokens: u64, at: Option<i64>) {
         self.saw_event = true;
+        self.saw_token_measurement = true;
         self.file_total = Some(tokens);
         self.touch_time(at);
     }
@@ -491,6 +541,7 @@ impl ProductAcc {
             return;
         }
         self.saw_event = true;
+        self.saw_token_measurement = true;
         self.file_last_fallback = Some(tokens);
         self.touch_time(at);
     }
@@ -526,7 +577,9 @@ impl ProductAcc {
         }
         Some(LocalProductUsage {
             product: self.product,
-            observed_tokens: if self.across_files > 0 {
+            observed_tokens: if self.token_fields_incomplete {
+                Measured::Unknown
+            } else if self.saw_token_measurement {
                 Measured::Observed(UsageAmount::new(self.across_files))
             } else {
                 Measured::Unknown
@@ -862,7 +915,7 @@ mod tests {
     #[test]
     fn duplicate_claude_message_ids_count_once() {
         let dir = scratch();
-        let line = r#"{"type":"assistant","uuid":"msg-1","timestamp":"2026-09-12T04:00:00.000Z","message":{"id":"msg-1","usage":{"input_tokens":11,"output_tokens":7}}}"#;
+        let line = r#"{"type":"assistant","uuid":"msg-1","timestamp":"2026-09-12T04:00:00.000Z","message":{"id":"msg-1","usage":{"input_tokens":11,"output_tokens":7,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#;
         write(&dir, "dup.jsonl", &format!("{line}\n{line}\n"));
         let report = read_sessions(LocalReadRequest {
             enabled: true,
@@ -917,6 +970,161 @@ mod tests {
         assert_eq!(
             report.products[0].observed_tokens,
             Measured::Observed(UsageAmount::new(7))
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn measured_zero_tokens_are_not_the_same_as_a_missing_token_field() {
+        let zero_dir = scratch();
+        write(
+            &zero_dir,
+            "zero.jsonl",
+            r#"{"timestamp":"2026-09-12T03:20:36.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":0}}}}
+"#,
+        );
+        let zero = read_sessions(LocalReadRequest {
+            enabled: true,
+            root: Some(&zero_dir),
+        });
+        let absent_dir = scratch();
+        write(
+            &absent_dir,
+            "rate-only.jsonl",
+            r#"{"timestamp":"2026-09-12T03:20:36.000Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":12,"window_minutes":300}}}}
+"#,
+        );
+        let absent = read_sessions(LocalReadRequest {
+            enabled: true,
+            root: Some(&absent_dir),
+        });
+        assert_eq!(
+            zero.products[0].observed_tokens,
+            Measured::Observed(UsageAmount::new(0))
+        );
+        assert!(absent.products[0].observed_tokens.is_unknown());
+        assert_ne!(
+            zero.products[0].observed_tokens,
+            absent.products[0].observed_tokens
+        );
+        fs::remove_dir_all(&zero_dir).ok();
+        fs::remove_dir_all(&absent_dir).ok();
+    }
+
+    #[test]
+    fn claude_missing_usage_field_does_not_become_a_finished_total() {
+        let dir = scratch();
+        write(
+            &dir,
+            "partial-usage.jsonl",
+            r#"{"type":"assistant","timestamp":"2026-09-12T04:00:00.000Z","message":{"usage":{"output_tokens":7,"cache_read_input_tokens":1,"cache_creation_input_tokens":1}}}
+"#,
+        );
+        let report = read_sessions(LocalReadRequest {
+            enabled: true,
+            root: Some(&dir),
+        });
+        let row = report
+            .products
+            .iter()
+            .find(|row| row.product == ProductId::Claude)
+            .unwrap();
+        assert_ne!(
+            row.observed_tokens,
+            Measured::Observed(UsageAmount::new(9)),
+            "missing input_tokens must not be added as 0"
+        );
+        assert!(row.observed_tokens.is_unknown());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn deep_session_file_makes_the_scan_partial() {
+        let dir = scratch();
+        let mut nested = dir.clone();
+        for name in ["a", "b", "c", "d", "e"] {
+            nested.push(name);
+        }
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(
+            nested.join("session.jsonl"),
+            format!("{}\n", codex_event(77, 77, "4")),
+        )
+        .unwrap();
+        let report = read_sessions(LocalReadRequest {
+            enabled: true,
+            root: Some(&dir),
+        });
+        assert!(report.files_skipped_deep >= 1);
+        assert!(!report.scan_complete);
+        assert!(
+            report.products.is_empty(),
+            "a file past the walk depth is not part of the total"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn hidden_session_file_makes_the_scan_partial() {
+        let dir = scratch();
+        write(
+            &dir,
+            ".secret.jsonl",
+            &format!("{}\n", codex_event(77, 77, "4")),
+        );
+        let report = read_sessions(LocalReadRequest {
+            enabled: true,
+            root: Some(&dir),
+        });
+        assert_eq!(report.files_skipped_hidden, 1);
+        assert!(!report.scan_complete);
+        assert!(report.products.is_empty());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_session_file_makes_the_scan_partial() {
+        let dir = scratch();
+        let outside = scratch();
+        write(
+            &outside,
+            "real.jsonl",
+            &format!("{}\n", codex_event(77, 77, "4")),
+        );
+        std::os::unix::fs::symlink(outside.join("real.jsonl"), dir.join("link.jsonl")).unwrap();
+        let report = read_sessions(LocalReadRequest {
+            enabled: true,
+            root: Some(&dir),
+        });
+        assert_eq!(report.files_skipped_symlink, 1);
+        assert!(!report.scan_complete);
+        assert!(
+            report.products.is_empty(),
+            "a symlink is not followed, so its tokens are not a measured total"
+        );
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn auth_file_is_counted_without_pretending_the_session_scan_stopped() {
+        let dir = scratch();
+        write(
+            &dir,
+            "session.jsonl",
+            &format!("{}\n", codex_event(15, 15, "3")),
+        );
+        write(&dir, "auth.json", r#"{"token":"do-not-read"}"#);
+        let report = read_sessions(LocalReadRequest {
+            enabled: true,
+            root: Some(&dir),
+        });
+        assert_eq!(report.skipped_auth_files, 1);
+        assert!(report.scan_complete);
+        assert_eq!(
+            report.products[0].observed_tokens,
+            Measured::Observed(UsageAmount::new(15))
         );
         fs::remove_dir_all(&dir).ok();
     }

@@ -262,6 +262,81 @@ mod tests {
         // Public board has no account remaining field. A counted 0 of public
         // events is not remaining quota.
         assert!(Measured::<u64>::Unknown.is_unknown());
+
+        let dir = std::env::temp_dir().join(format!(
+            "sister-usage-remaining-parse-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-09-12T03:20:36.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":125}},"rate_limits":{"primary":{"used_percent":37,"window_minutes":300,"resets_at":1783800000}}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let scanned = crate::sessions::read_sessions(crate::sessions::LocalReadRequest {
+            enabled: true,
+            root: Some(&dir),
+        });
+        match &scanned.products[0].quota {
+            crate::model::Measured::Observed(snapshot) => {
+                assert!((snapshot.used_percent - 37.0).abs() < f64::EPSILON);
+            }
+            other => panic!("expected a used_percent snapshot, got {other:?}"),
+        }
+        let adapter = crate::local::ConfiguredSessionAdapter {
+            enabled: true,
+            root: Some(dir.clone()),
+        };
+        let mut store = crate::policy::DedupStore::empty();
+        let outcome = crate::policy::refresh_board(
+            &BoardTransport(board_json(CONFIRMED).into_bytes()),
+            &mut store,
+            &adapter,
+            crate::policy::RefreshRequest {
+                enabled: true,
+                reaction_enabled: false,
+                stopped: false,
+                now_unix_ms: 1_000,
+                reason: crate::model::RefreshReason::Enable,
+            },
+            || false,
+        );
+        assert_eq!(
+            outcome.view.local.remaining,
+            crate::model::Measured::Unknown
+        );
+        assert_eq!(
+            outcome.view.local_report.products[0].remaining_tokens,
+            crate::model::Measured::Unknown
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    struct BoardTransport(Vec<u8>);
+
+    impl crate::policy::Transport for BoardTransport {
+        fn get(
+            &self,
+            endpoint: crate::model::PublicEndpoint,
+        ) -> crate::Result<crate::TransportResponse> {
+            assert_eq!(endpoint, crate::model::PublicEndpoint::Status);
+            let body = self.0.clone();
+            Ok(crate::TransportResponse {
+                status: 200,
+                final_url: endpoint.url().to_owned(),
+                content_type: Some("application/json".to_owned()),
+                content_encoding: None,
+                content_length: Some(body.len() as u64),
+                body,
+            })
+        }
     }
 
     #[test]

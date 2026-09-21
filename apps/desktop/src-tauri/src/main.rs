@@ -5890,6 +5890,11 @@ fn usage_public_status_set(
     shell: tauri::State<'_, Shell>,
 ) -> Result<usage_status::UsageStatusView, String> {
     usage_status::stop_intent(&shell.usage);
+    let was_enabled = config_path().ok().and_then(|path| {
+        sister_core::config::Config::load(&path)
+            .ok()
+            .map(|config| config.shell.usage.public_status_enabled)
+    });
     usage_status::set_from_page(
         enabled,
         reaction_enabled,
@@ -5900,11 +5905,12 @@ fn usage_public_status_set(
     if enabled.get() && !stopped {
         let generation = shell.usage.generation.load(Ordering::Acquire);
         let data_dir = shell.data_dir.clone();
+        let reason = sister_usage::refresh_reason_for_settings_save(was_enabled.unwrap_or(false));
         let (view, reaction) = usage_status::refresh_blocking(
             &shell.usage,
             data_dir.as_deref(),
             stopped,
-            sister_usage::RefreshReason::Enable,
+            reason,
             generation,
         )?;
         let _ = app.emit("usage-status-changed", view.clone());

@@ -35,6 +35,12 @@ pub struct DedupStore {
     pub last_success_unix_ms: Option<i64>,
     #[serde(default)]
     pub last_attempt_unix_ms: Option<i64>,
+    /// Latest failed GET. Cleared on the next successful GET. `None` means the
+    /// last stored attempt did not fail, which includes "never fetched".
+    #[serde(default)]
+    pub last_fetch_error: Option<String>,
+    #[serde(default)]
+    pub last_failure_unix_ms: Option<i64>,
     #[serde(default)]
     pub cached_updated_at: Option<String>,
     #[serde(default)]
@@ -49,6 +55,8 @@ impl Default for DedupStore {
             baseline_complete: false,
             last_success_unix_ms: None,
             last_attempt_unix_ms: None,
+            last_fetch_error: None,
+            last_failure_unix_ms: None,
             cached_updated_at: None,
             cached_board: None,
         }
@@ -90,32 +98,31 @@ impl DedupStore {
         std::fs::rename(&tmp, final_path).map_err(|_| Error::StoreUnwritable)
     }
 
-    fn remember_board(&mut self, board: &PublicBoard) {
-        for row in &board.products {
-            if let Some(event) = row.reset.confirmed() {
-                let key = row.product.as_str().to_owned();
-                let raise = match self.seen.get(&key) {
-                    Some(seen) if event.announced_unix_ms < seen.announced_unix_ms => false,
-                    Some(seen)
-                        if event.announced_unix_ms == seen.announced_unix_ms
-                            && seen.id != event.event_id =>
-                    {
-                        false
-                    }
-                    _ => true,
-                };
-                if raise {
-                    self.seen.insert(
-                        key,
-                        SeenEvent {
-                            id: event.event_id.clone(),
-                            announced_at: event.announced_at.clone(),
-                            announced_unix_ms: event.announced_unix_ms,
-                        },
-                    );
-                }
+    fn remember_event(&mut self, product: ProductId, event: &ConfirmedReset) {
+        let key = product.as_str().to_owned();
+        let raise = match self.seen.get(&key) {
+            Some(seen) if event.announced_unix_ms < seen.announced_unix_ms => false,
+            Some(seen)
+                if event.announced_unix_ms == seen.announced_unix_ms
+                    && seen.id != event.event_id =>
+            {
+                false
             }
+            _ => true,
+        };
+        if raise {
+            self.seen.insert(
+                key,
+                SeenEvent {
+                    id: event.event_id.clone(),
+                    announced_at: event.announced_at.clone(),
+                    announced_unix_ms: event.announced_unix_ms,
+                },
+            );
         }
+    }
+
+    fn cache_board(&mut self, board: &PublicBoard) {
         self.cached_board = Some(board.clone());
         self.cached_updated_at = Some(board.updated_at.clone());
         self.baseline_complete = true;
@@ -210,7 +217,9 @@ pub fn refresh_board(
             }
             let reaction = apply_board(store, &board, request);
             store.last_success_unix_ms = Some(request.now_unix_ms);
-            store.remember_board(&board);
+            store.last_fetch_error = None;
+            store.last_failure_unix_ms = None;
+            store.cache_board(&board);
             RefreshOutcome {
                 view: live_view(
                     store,
@@ -226,6 +235,9 @@ pub fn refresh_board(
             }
         }
         Err(error) => {
+            let message = error.to_string();
+            store.last_fetch_error = Some(message.clone());
+            store.last_failure_unix_ms = Some(request.now_unix_ms);
             let previous = store.cached_board.clone();
             let served = if previous.is_some() {
                 ServedFrom::NetworkErrorKeptPrevious
@@ -240,7 +252,7 @@ pub fn refresh_board(
                     request,
                     served,
                     previous,
-                    Some(error.to_string()),
+                    Some(message),
                 ),
                 reaction: ResetReaction::None,
                 did_get: true,
@@ -268,6 +280,25 @@ fn should_serve_cache(store: &DedupStore, request: RefreshRequest) -> bool {
     request.now_unix_ms.saturating_sub(last_success) < MIN_GET_INTERVAL_MS
 }
 
+fn is_beyond_announcement_window(now_unix_ms: i64, announced_unix_ms: i64) -> bool {
+    now_unix_ms >= 1_577_836_800_000 && announced_unix_ms > now_unix_ms.saturating_add(60_000)
+}
+
+fn remember_baseline_events(store: &mut DedupStore, board: &PublicBoard, now_unix_ms: i64) {
+    for row in &board.products {
+        let Some(event) = row.reset.confirmed() else {
+            continue;
+        };
+        if is_duplicate_or_stale(store, row.product, event) {
+            continue;
+        }
+        if is_beyond_announcement_window(now_unix_ms, event.announced_unix_ms) {
+            continue;
+        }
+        store.remember_event(row.product, event);
+    }
+}
+
 fn apply_board(
     store: &mut DedupStore,
     board: &PublicBoard,
@@ -276,12 +307,12 @@ fn apply_board(
     if request.reason == RefreshReason::Disable {
         return ResetReaction::None;
     }
-    let baseline = !store.baseline_complete
-        || store.seen.is_empty()
-        || matches!(
-            request.reason,
-            RefreshReason::Enable | RefreshReason::Startup
-        );
+    // The first successful board is the baseline, including a board with zero
+    // events. Enable / a later save is not a second baseline.
+    if !store.baseline_complete {
+        remember_baseline_events(store, board, request.now_unix_ms);
+        return ResetReaction::None;
+    }
 
     let mut newly = Vec::new();
     for row in &board.products {
@@ -291,20 +322,17 @@ fn apply_board(
         if is_duplicate_or_stale(store, row.product, event) {
             continue;
         }
-        if request.now_unix_ms >= 1_577_836_800_000
-            && event.announced_unix_ms > request.now_unix_ms.saturating_add(60_000)
-        {
+        if is_beyond_announcement_window(request.now_unix_ms, event.announced_unix_ms) {
             continue;
         }
-        if !baseline {
-            newly.push((row.product, event.clone()));
-        }
+        newly.push((row.product, event.clone()));
     }
 
-    if !request.reaction_enabled || baseline || newly.is_empty() {
+    if !request.reaction_enabled || newly.is_empty() {
         return ResetReaction::None;
     }
     let (product, event) = newly.into_iter().next().expect("non-empty");
+    store.remember_event(product, &event);
     ResetReaction::NewlyConfirmed { product, event }
 }
 
@@ -391,6 +419,85 @@ fn live_view(
     }
 }
 
+/// What a settings re-read can say without doing another GET.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecalledBoard {
+    pub served_from: ServedFrom,
+    pub fetch_error: Option<String>,
+    pub board: Option<PublicBoard>,
+    pub board_is_live: bool,
+}
+
+pub fn recall_stored_board(store: &DedupStore, enabled: bool, stopped: bool) -> RecalledBoard {
+    if stopped {
+        return RecalledBoard {
+            served_from: ServedFrom::Stopped,
+            fetch_error: None,
+            board: store.cached_board.clone(),
+            board_is_live: false,
+        };
+    }
+    if !enabled {
+        return RecalledBoard {
+            served_from: ServedFrom::Disabled,
+            fetch_error: None,
+            board: None,
+            board_is_live: false,
+        };
+    }
+    let fetch_error = store.last_fetch_error.clone();
+    let board = store.cached_board.clone();
+    if fetch_error.is_some() {
+        return RecalledBoard {
+            served_from: if board.is_some() {
+                ServedFrom::NetworkErrorKeptPrevious
+            } else {
+                ServedFrom::Network
+            },
+            fetch_error,
+            board,
+            board_is_live: false,
+        };
+    }
+    let board_is_live = store.last_success_unix_ms.is_some() && board.is_some();
+    RecalledBoard {
+        served_from: ServedFrom::CooldownCache,
+        fetch_error: None,
+        board,
+        board_is_live,
+    }
+}
+
+/// Settings save fetches only while the board is on. `Enable` is the off→on
+/// reason. A save that leaves an already-open board on must not send it.
+pub fn refresh_reason_for_settings_save(was_enabled: bool) -> RefreshReason {
+    if was_enabled {
+        RefreshReason::Poll
+    } else {
+        RefreshReason::Enable
+    }
+}
+
+pub fn usage_config_missing_message() -> &'static str {
+    "找不到設定檔路徑。公開看板與本機用量都還沒讀。"
+}
+
+pub fn usage_config_parse_message(detail: &str) -> String {
+    format!("用量設定讀不出來：{detail}。公開看板與本機用量都還沒讀。")
+}
+
+pub fn usage_data_dir_missing_message() -> &'static str {
+    "找不到資料目錄。公開看板狀態還沒讀。本機用量仍照它自己的設定讀。"
+}
+
+pub fn usage_store_unreadable_message() -> &'static str {
+    "公開看板狀態檔 usage-public-status-v1.json 讀不出來。刪掉該檔後再查。本機用量不受這個檔影響。"
+}
+
+pub fn usage_store_unwritable_message() -> &'static str {
+    "公開看板狀態檔 usage-public-status-v1.json 寫不進去。刪掉該檔後再查。本機用量不受這個檔影響。"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,6 +575,19 @@ mod tests {
             .replace("codex:2026-09-12", "codex:2026-09-21")
             .replace("2026-09-12T03:20:36.000Z", "2026-09-21T04:00:00.000Z")
             .into_bytes()
+    }
+
+    fn product_event(id: &str, product: &str, announced_at: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","productId":"{product}","kind":"reset","announcedAt":"{announced_at}","verified":true}}"#
+        )
+    }
+
+    fn board_with(codex_event: &str, claude_event: &str) -> Vec<u8> {
+        format!(
+            r#"{{"updatedAt":"2026-09-21T01:00:22.000Z","products":{{"codex":{{"latestEvent":{codex_event},"forecast":null,"total":0}},"claude":{{"latestEvent":{claude_event},"forecast":null,"total":0}},"chatgpt":{{"latestEvent":null,"forecast":null,"total":0}},"cursor":{{"latestEvent":null,"forecast":null,"total":0}},"gemini":{{"latestEvent":null,"forecast":null,"total":0}},"copilot":{{"latestEvent":null,"forecast":null,"total":0}},"grok":{{"latestEvent":null,"forecast":null,"total":0}}}}}}"#
+        )
+        .into_bytes()
     }
 
     fn request(reason: RefreshReason, reaction: bool, now: i64) -> RefreshRequest {
@@ -592,14 +712,14 @@ mod tests {
     }
 
     #[test]
-    fn empty_store_startup_is_baseline() {
+    fn empty_store_first_poll_is_baseline() {
         let transport = FakeTransport::body(&confirmed_board());
         let mut store = DedupStore::empty();
         let outcome = refresh_board(
             &transport,
             &mut store,
             &UnavailableLocalUsage,
-            request(RefreshReason::Startup, true, 1_000),
+            request(RefreshReason::Poll, true, 1_000),
             || false,
         );
         assert_eq!(outcome.reaction, ResetReaction::None);
@@ -624,7 +744,7 @@ mod tests {
             &second,
             &mut restored,
             &UnavailableLocalUsage,
-            request(RefreshReason::Startup, true, 1_000 + MIN_GET_INTERVAL_MS),
+            request(RefreshReason::Poll, true, 1_000 + MIN_GET_INTERVAL_MS),
             || false,
         );
         assert_eq!(outcome.reaction, ResetReaction::None);
@@ -747,6 +867,51 @@ mod tests {
             board.product(ProductId::Claude).unwrap().reset,
             PublicReset::Confirmed(_)
         ));
+        let dir = std::env::temp_dir().join(format!(
+            "sister-usage-remaining-policy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("session.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-09-12T03:20:36.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":125}},"rate_limits":{"primary":{"used_percent":12,"window_minutes":300,"resets_at":1783800000}}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let adapter = crate::local::ConfiguredSessionAdapter {
+            enabled: true,
+            root: Some(dir.clone()),
+        };
+        let scanned = crate::sessions::read_sessions(crate::sessions::LocalReadRequest {
+            enabled: true,
+            root: Some(&dir),
+        });
+        match &scanned.products[0].quota {
+            Measured::Observed(snapshot) => {
+                assert!((snapshot.used_percent - 12.0).abs() < f64::EPSILON);
+            }
+            other => panic!("quota should be observed before refresh, got {other:?}"),
+        }
+        let mut quota_store = DedupStore::empty();
+        let outcome = refresh_board(
+            &FakeTransport::body(&confirmed_board()),
+            &mut quota_store,
+            &adapter,
+            request(RefreshReason::Enable, true, 1_000),
+            || false,
+        );
+        assert_eq!(outcome.view.local.remaining, Measured::Unknown);
+        assert_eq!(
+            outcome.view.local_report.products[0].remaining_tokens,
+            Measured::Unknown
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -853,6 +1018,10 @@ mod tests {
             || false,
         );
         assert_eq!(outcome.reaction, ResetReaction::None);
+        assert_ne!(
+            store.seen.get("codex").map(|seen| seen.id.as_str()),
+            Some("codex:2099-01-01")
+        );
     }
 
     #[test]
@@ -878,5 +1047,260 @@ mod tests {
         assert!(!outcome.did_get);
         assert_eq!(outcome.view.served_from, ServedFrom::CooldownCache);
         assert_eq!(second.calls.get(), 0);
+    }
+
+    #[test]
+    fn failed_fetch_persists_error_and_time_across_reload() {
+        let now = 1_800_000_000_000;
+        let mut store = DedupStore::empty();
+        refresh_board(
+            &FakeTransport::body(&confirmed_board()),
+            &mut store,
+            &UnavailableLocalUsage,
+            request(RefreshReason::Enable, true, now),
+            || false,
+        );
+        assert!(store.last_fetch_error.is_none());
+        assert_eq!(store.last_success_unix_ms, Some(now));
+        let failure = Error::Transport(crate::TransportFailure::Timeout);
+        let failed_at = now + MIN_GET_INTERVAL_MS;
+        let outcome = refresh_board(
+            &FakeTransport::fail(failure.clone()),
+            &mut store,
+            &UnavailableLocalUsage,
+            request(RefreshReason::Poll, true, failed_at),
+            || false,
+        );
+        assert_eq!(
+            outcome.view.fetch_error.as_deref(),
+            Some(failure.to_string().as_str())
+        );
+        assert_eq!(
+            store.last_fetch_error.as_deref(),
+            Some(failure.to_string().as_str())
+        );
+        assert_eq!(store.last_failure_unix_ms, Some(failed_at));
+        assert_eq!(store.last_success_unix_ms, Some(now));
+        assert!(store.cached_board.is_some());
+        let dir = std::env::temp_dir().join(format!(
+            "sister-usage-dedup-{}-{}",
+            std::process::id(),
+            failed_at
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        store.save(&dir).unwrap();
+        let loaded = DedupStore::load(&dir).unwrap();
+        assert_eq!(loaded.last_fetch_error, store.last_fetch_error);
+        assert_eq!(loaded.last_failure_unix_ms, Some(failed_at));
+        assert_eq!(loaded.last_success_unix_ms, Some(now));
+        let recalled = recall_stored_board(&loaded, true, false);
+        assert_eq!(recalled.fetch_error, loaded.last_fetch_error);
+        assert!(!recalled.board_is_live);
+        assert!(recalled.board.is_some());
+        let never = recall_stored_board(&DedupStore::empty(), true, false);
+        assert!(never.fetch_error.is_none());
+        assert!(!never.board_is_live);
+        assert!(never.board.is_none());
+        assert_ne!(recalled.fetch_error, never.fetch_error);
+        let live = recall_stored_board(
+            &{
+                let mut success_only = loaded.clone();
+                success_only.last_fetch_error = None;
+                success_only.last_failure_unix_ms = None;
+                success_only
+            },
+            true,
+            false,
+        );
+        assert!(live.board_is_live);
+        assert!(live.fetch_error.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn settings_save_sends_baseline_reason_only_when_turning_on() {
+        assert_eq!(
+            refresh_reason_for_settings_save(false),
+            RefreshReason::Enable
+        );
+        assert_eq!(refresh_reason_for_settings_save(true), RefreshReason::Poll);
+    }
+
+    #[test]
+    fn config_and_store_failures_are_different_sentences() {
+        let missing = usage_config_missing_message();
+        let parsed = usage_config_parse_message("config.toml 解析失敗");
+        let data_dir = usage_data_dir_missing_message();
+        let unreadable = usage_store_unreadable_message();
+        let unwritable = usage_store_unwritable_message();
+        let sentences = [missing, parsed.as_str(), data_dir, unreadable, unwritable];
+        for left in 0..sentences.len() {
+            for right in (left + 1)..sentences.len() {
+                assert_ne!(sentences[left], sentences[right]);
+            }
+        }
+        assert!(unreadable.contains("usage-public-status-v1.json"));
+        assert!(unreadable.contains("刪掉該檔後再查"));
+        assert!(unreadable.contains("本機用量不受這個檔影響"));
+        assert!(!parsed.contains("刪掉該檔後再查"));
+        assert!(parsed.contains("用量設定讀不出來"));
+        assert!(parsed.contains("都還沒讀"));
+    }
+
+    #[test]
+    fn resave_after_baseline_announces_a_new_verified_id() {
+        let mut store = DedupStore::empty();
+        refresh_board(
+            &FakeTransport::body(&confirmed_board()),
+            &mut store,
+            &UnavailableLocalUsage,
+            request(RefreshReason::Enable, true, 1_000),
+            || false,
+        );
+        assert!(store.baseline_complete);
+        assert_eq!(store.seen.get("codex").unwrap().id, "codex:2026-09-12");
+        let outcome = refresh_board(
+            &FakeTransport::body(&newer_board()),
+            &mut store,
+            &UnavailableLocalUsage,
+            request(RefreshReason::Enable, true, 1_000 + MIN_GET_INTERVAL_MS),
+            || false,
+        );
+        match outcome.reaction {
+            ResetReaction::NewlyConfirmed { product, event } => {
+                assert_eq!(product, ProductId::Codex);
+                assert_eq!(event.event_id, "codex:2026-09-21");
+            }
+            other => panic!("resave must still announce a new id, got {other:?}"),
+        }
+        assert_eq!(store.seen.get("codex").unwrap().id, "codex:2026-09-21");
+    }
+
+    #[test]
+    fn future_announcement_is_withheld_until_the_clock_catches_up() {
+        let mut store = DedupStore::empty();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-13T00:00:00.000Z")
+            .unwrap()
+            .timestamp_millis();
+        refresh_board(
+            &FakeTransport::body(&confirmed_board()),
+            &mut store,
+            &UnavailableLocalUsage,
+            request(RefreshReason::Enable, true, now),
+            || false,
+        );
+        assert_eq!(store.seen.get("codex").unwrap().id, "codex:2026-09-12");
+        let future = String::from_utf8(confirmed_board())
+            .unwrap()
+            .replace("codex:2026-09-12", "codex:2099-01-01")
+            .replace("2026-09-12T03:20:36.000Z", "2099-01-01T00:00:00.000Z");
+        let blocked = refresh_board(
+            &FakeTransport::body(future.as_bytes()),
+            &mut store,
+            &UnavailableLocalUsage,
+            request(RefreshReason::Poll, true, now + MIN_GET_INTERVAL_MS),
+            || false,
+        );
+        assert_eq!(blocked.reaction, ResetReaction::None);
+        assert_eq!(store.seen.get("codex").unwrap().id, "codex:2026-09-12");
+        let announced = chrono::DateTime::parse_from_rfc3339("2099-01-01T00:00:00.000Z")
+            .unwrap()
+            .timestamp_millis();
+        let caught_up = refresh_board(
+            &FakeTransport::body(future.as_bytes()),
+            &mut store,
+            &UnavailableLocalUsage,
+            request(RefreshReason::Poll, true, announced + 120_000),
+            || false,
+        );
+        match caught_up.reaction {
+            ResetReaction::NewlyConfirmed { event, .. } => {
+                assert_eq!(event.event_id, "codex:2099-01-01");
+            }
+            other => panic!("expected the withheld reset once time caught up, got {other:?}"),
+        }
+        assert_eq!(store.seen.get("codex").unwrap().id, "codex:2099-01-01");
+    }
+
+    #[test]
+    fn empty_first_board_still_completes_baseline_and_the_next_reset_is_spoken() {
+        let mut store = DedupStore::empty();
+        let first = refresh_board(
+            &FakeTransport::body(&board_with("null", "null")),
+            &mut store,
+            &UnavailableLocalUsage,
+            request(RefreshReason::Enable, true, 1_000),
+            || false,
+        );
+        assert_eq!(first.reaction, ResetReaction::None);
+        assert!(store.baseline_complete);
+        assert!(store.seen.is_empty());
+        let second = refresh_board(
+            &FakeTransport::body(&confirmed_board()),
+            &mut store,
+            &UnavailableLocalUsage,
+            request(RefreshReason::Poll, true, 1_000 + MIN_GET_INTERVAL_MS),
+            || false,
+        );
+        match second.reaction {
+            ResetReaction::NewlyConfirmed { product, event } => {
+                assert_eq!(product, ProductId::Codex);
+                assert_eq!(event.event_id, "codex:2026-09-12");
+            }
+            other => {
+                panic!("first real reset after an empty baseline must be spoken, got {other:?}")
+            }
+        }
+        assert_eq!(store.seen.get("codex").unwrap().id, "codex:2026-09-12");
+    }
+
+    #[test]
+    fn two_new_resets_in_one_round_remember_only_the_one_that_was_spoken() {
+        let mut store = DedupStore::empty();
+        refresh_board(
+            &FakeTransport::body(&board_with("null", "null")),
+            &mut store,
+            &UnavailableLocalUsage,
+            request(RefreshReason::Enable, true, 1_000),
+            || false,
+        );
+        let both = board_with(
+            &product_event("codex:2026-09-21", "codex", "2026-09-21T04:00:00.000Z"),
+            &product_event("claude:2026-09-21", "claude", "2026-09-21T04:05:00.000Z"),
+        );
+        let first = refresh_board(
+            &FakeTransport::body(&both),
+            &mut store,
+            &UnavailableLocalUsage,
+            request(RefreshReason::Poll, true, 1_000 + MIN_GET_INTERVAL_MS),
+            || false,
+        );
+        match first.reaction {
+            ResetReaction::NewlyConfirmed { product, event } => {
+                assert_eq!(product, ProductId::Codex);
+                assert_eq!(event.event_id, "codex:2026-09-21");
+            }
+            other => panic!("expected the first product, got {other:?}"),
+        }
+        assert!(store.seen.contains_key("codex"));
+        assert!(
+            !store.seen.contains_key("claude"),
+            "the unspoken reset must stay eligible"
+        );
+        let second = refresh_board(
+            &FakeTransport::body(&both),
+            &mut store,
+            &UnavailableLocalUsage,
+            request(RefreshReason::Poll, true, 1_000 + 2 * MIN_GET_INTERVAL_MS),
+            || false,
+        );
+        match second.reaction {
+            ResetReaction::NewlyConfirmed { product, event } => {
+                assert_eq!(product, ProductId::Claude);
+                assert_eq!(event.event_id, "claude:2026-09-21");
+            }
+            other => panic!("expected the second product on the next fetch, got {other:?}"),
+        }
+        assert_eq!(store.seen.get("claude").unwrap().id, "claude:2026-09-21");
     }
 }

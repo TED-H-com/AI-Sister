@@ -26,8 +26,10 @@ pub use model::{
 };
 pub use parse::{parse_latest, parse_status_board};
 pub use policy::{
-    DedupStore, RefreshOutcome, RefreshRequest, STORE_FILE_NAME, STORE_SCHEMA, Transport,
-    refresh_board,
+    DedupStore, RecalledBoard, RefreshOutcome, RefreshRequest, STORE_FILE_NAME, STORE_SCHEMA,
+    Transport, recall_stored_board, refresh_board, refresh_reason_for_settings_save,
+    usage_config_missing_message, usage_config_parse_message, usage_data_dir_missing_message,
+    usage_store_unreadable_message, usage_store_unwritable_message,
 };
 pub use sessions::{LocalReadRequest, read_sessions};
 
