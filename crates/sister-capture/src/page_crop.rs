@@ -452,13 +452,14 @@ mod tests {
     }
 
     #[test]
-    fn one_qualified_page_is_not_enough_when_the_walk_did_not_finish() {
+    fn one_qualified_page_is_not_enough_while_depth_one_is_unobserved() {
         let nodes = [good()];
         let unfinished =
             choose_page_crop(&nodes, Some(monitor()), false, depth_one_left_unobserved());
         // The same page with the flag flipped the other way. If the line
         // above passes only because the page itself does not qualify, this
-        // one fails.
+        // one fails. Both calls leave depth 1 unobserved: with that layer
+        // seen, one qualified page is enough and the first line would clip.
         let finished = choose_page_crop(&nodes, Some(monitor()), true, depth_one_left_unobserved());
         assert_eq!(unfinished, PageCrop::Unresolved);
         assert_eq!(finished, PageCrop::Crop(0));

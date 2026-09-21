@@ -266,7 +266,8 @@ impl FocusedText<'_> {
             // Edge PDF often keeps keyboard focus on the TextPattern Document.
             // GetVisibleRanges then flattens offscreen pages into the same
             // range. Clip when one on-screen page Group was singled out.
-            // An unresolved walk leaves the document ranges alone.
+            // An unfinished count and a finished walk that found no page are
+            // different answers, and neither one clips.
             if self.role()? == TextRole::Document
                 && let Some(scope) = self.onscreen_page_scope(&pattern)
             {
