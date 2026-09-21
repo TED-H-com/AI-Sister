@@ -994,6 +994,15 @@ let personaTapLines = true;
 let lastSpokenLineId = null;
 let personaVoiceEnabled = false;
 let voiceRequest = 0;
+/*
+ * `HTMLMediaElement.play()` 是 Promise。Stop 已經 pause／拿掉 src 之後，晚到的
+ * resolve 在 WebView2 仍可能把同一份 buffer 再開始播——只擋 speaking flag 會讓
+ * 聲音在一顆「念給我聽」後面繼續。每一段 play 有自己的代；Stop 把 current 清成
+ * `null`。晚到的那一段若發現已經沒有人接手，必須自己再停一次；若後來的播放已
+ * 經接手，就別動 element。
+ */
+let mediaPlayGeneration = 0;
+let currentMediaPlayGen = null;
 /**
  * 正在念的那一段條文錄音是哪一代 `voiceRequest`；`null` = 沒有在念。
  *
@@ -1396,6 +1405,7 @@ const AZURE_TRUSTED_REPLAY = Object.freeze({});
  */
 const CONSENT_LISTEN_PLAY = "🔊 念給我聽";
 const CONSENT_LISTEN_STOP = "■ 停止朗讀";
+const CONSENT_LISTEN_FAILED = "這段本機錄音播放失敗；可以直接讀文字後回答。";
 /*
  * 停下來要說一聲。Azure 那顆從 alpha.109 就會說「Azure 朗讀已停止。」，本機答案
  * 那顆在它之後補上，只有這一顆安靜地停——而這是三顆裡**最**需要開口的那顆：他正
@@ -1440,6 +1450,7 @@ function clearPersonaSpeaking() {
 const ANSWER_READ_PLAY = "🔊 用本機聲音朗讀";
 const ANSWER_READ_STOP = "■ 停止本機朗讀";
 const ANSWER_READ_STOPPED = "本機朗讀已停止。";
+const ANSWER_READ_FAILED = "本機朗讀失敗。再按一次重播。";
 /*
  * 這句話是**一則指示**，不是狀態描述：它叫他去設定裡打開「本機聲音」。他照做之後
  * `persona-changed` 回來，那一刻這句話就變成假的了——畫面不可以還掛著一句「你還沒
@@ -1463,6 +1474,21 @@ let localAnswerButton = null;
 const AZURE_READ_PLAY = "☁ 用 Azure 朗讀／重播（送出這段文字）";
 const AZURE_READ_STOP = "■ 停止／取消 Azure 朗讀";
 const AZURE_READ_STOPPED = "Azure 朗讀已停止。";
+const AZURE_READ_FAILED = "Azure 音訊播放失敗。請再重播一次。";
+const FRAME_OPEN_FAILED_PREFIX = "當時的畫面打不開：";
+const PLAYBACK_STATUS_LINES = new Set([
+  ANSWER_READ_STOPPED,
+  ANSWER_READ_FAILED,
+  AZURE_READ_STOPPED,
+  AZURE_READ_FAILED,
+  "語音播放失敗。再按一次重播。",
+  "Azure 朗讀失敗。請檢查語音設定後重播。",
+  "Azure 回傳的音訊無法播放。請再重播一次。",
+  "這個視窗無法播放音訊。請重開 AI-Sister。",
+  "Azure 音訊未開始播放。請重開 AI-Sister 後重播。",
+  "Azure 音訊未開始播放。解除全停後再重播。",
+  "本機朗讀未開始。解除全停後再重播。",
+]);
 
 function resetLocalAnswerButton() {
   if (localAnswerButton) {
@@ -1480,6 +1506,34 @@ function resetAzureAnswerButton() {
   azureAnswerButton = null;
 }
 
+function armMediaPlay() {
+  const playGen = (mediaPlayGeneration += 1);
+  currentMediaPlayGen = playGen;
+  return playGen;
+}
+
+function invalidateMediaPlay() {
+  mediaPlayGeneration += 1;
+  currentMediaPlayGen = null;
+}
+
+/**
+ * `play()` 回來時這一段還是不是現在的聲音。`stale` 且沒有後來的播放接手，
+ * 就把可能被晚到 resolve 重新點著的 element 停掉。
+ */
+function settleMediaPlay(playGen) {
+  if (playGen === currentMediaPlayGen) return "ours";
+  if (currentMediaPlayGen === null) {
+    personaAudio?.pause?.();
+    personaAudio?.removeAttribute?.("src");
+    if (personaAudio) {
+      personaAudio.onended = null;
+      personaAudio.onerror = null;
+    }
+  }
+  return "stale";
+}
+
 /**
  * 取消的是播放意圖：晚到的 native response 會被丟掉，已經開始的 blocking HTTPS
  * POST 可能仍跑到 timeout。只有真的有 request 在飛時才送 cancel IPC；冷啟動與
@@ -1495,6 +1549,7 @@ function stopAzureSpeech({ cancelNative = true } = {}) {
   azurePendingGeneration = null;
   resetAzureAnswerButton();
   if (hadAzureMedia && personaAudio) {
+    invalidateMediaPlay();
     personaAudio.pause?.();
     personaAudio.removeAttribute?.("src");
     personaAudio.onended = null;
@@ -1556,6 +1611,7 @@ function stopLocalSpeech() {
 function stopPersonaMedia({ cancelAzureNative = true } = {}) {
   stopAzureSpeech({ cancelNative: cancelAzureNative });
   voiceRequest += 1;
+  invalidateMediaPlay();
   personaAudio?.pause?.();
   personaAudio?.removeAttribute?.("src");
   if (personaAudio) {
@@ -1588,12 +1644,19 @@ function stopPersonaMedia({ cancelAzureNative = true } = {}) {
  */
 function clearPlaybackStoppedLines() {
   const said = personaLine?.textContent;
-  if (said === ANSWER_READ_STOPPED || said === AZURE_READ_STOPPED) {
+  if (said && PLAYBACK_STATUS_LINES.has(said)) {
     personaLine.textContent = "";
     personaLine.hidden = true;
   }
-  if (consentResult && consentResult.textContent === CONSENT_LISTEN_STOPPED) {
+  const consentSaid = consentResult?.textContent ?? "";
+  if (
+    consentResult &&
+    (consentSaid === CONSENT_LISTEN_STOPPED ||
+      consentSaid === CONSENT_LISTEN_FAILED ||
+      consentSaid.startsWith("現在不能朗讀："))
+  ) {
     consentResult.textContent = "";
+    consentResult.classList.remove("bad");
   }
 }
 
@@ -1710,7 +1773,7 @@ function speakWithLocalSystemVoice(text, presentation = null, button = null) {
         localSpeechPresentation = null;
         releaseNativePresentation(presentation);
       }
-      personaLine.textContent = "本機朗讀失敗。再按一次重播。";
+      personaLine.textContent = ANSWER_READ_FAILED;
       personaLine.hidden = false;
     };
     try {
@@ -1869,33 +1932,45 @@ async function playBundledPersonaLine(line) {
   bundledVoicePresentation = presentation;
   personaAudio.currentTime = 0;
   let playbackFinished = false;
+  const playGen = armMediaPlay();
   const finishPlayback = () => {
     if (playbackFinished) return;
     playbackFinished = true;
-    if (request === voiceRequest) setPersonaSpeaking(PERSONA_SPEAKING_FIXED, false);
-    personaAudio.onended = null;
-    personaAudio.onerror = null;
-    personaAudio.removeAttribute?.("src");
+    if (request === voiceRequest && currentMediaPlayGen === playGen) {
+      setPersonaSpeaking(PERSONA_SPEAKING_FIXED, false);
+    }
+    const ours = currentMediaPlayGen === playGen || currentMediaPlayGen === null;
+    if (currentMediaPlayGen === playGen) currentMediaPlayGen = null;
+    if (ours) {
+      personaAudio.onended = null;
+      personaAudio.onerror = null;
+      personaAudio.removeAttribute?.("src");
+    }
     if (bundledVoicePresentation === presentation) bundledVoicePresentation = null;
     releaseNativePresentation(presentation);
   };
   personaAudio.onended = finishPlayback;
-  personaAudio.onerror = () => {
+  const playbackFailed = () => {
+    const ours = request === voiceRequest && currentMediaPlayGen === playGen && !playbackFinished;
     finishPlayback();
-    if (request === voiceRequest) {
+    if (ours) {
       personaLine.textContent = "語音播放失敗。再按一次重播。";
       personaLine.hidden = false;
     }
   };
+  personaAudio.onerror = playbackFailed;
   personaAudio.src = line.file;
   try {
     await personaAudio.play();
-    if (request === voiceRequest && !playbackFinished) {
-      setPersonaSpeaking(PERSONA_SPEAKING_FIXED, true);
-      return true;
+    if (settleMediaPlay(playGen) !== "ours" || request !== voiceRequest || playbackFinished) {
+      if (playbackFinished) return false;
+      finishPlayback();
+      return false;
     }
+    setPersonaSpeaking(PERSONA_SPEAKING_FIXED, true);
+    return true;
   } catch {
-    personaAudio.onerror?.();
+    playbackFailed();
   }
   return false;
 }
@@ -2242,6 +2317,10 @@ async function playConsentSheet(event) {
   }
   stopPersonaMedia();
   const request = voiceRequest;
+  // 鍵面在 admit／play 還在飛的時候就要寫停止。Azure 那顆早已這樣做；這一顆
+  // 以前等 play() resolve 才翻面，於是 pending 期間再按一下是重播不是停止。
+  consentReadingRequest = request;
+  paintConsentListen();
   let presentation;
   try {
     presentation = await invoke("persona_fixed_voice_admit");
@@ -2253,10 +2332,16 @@ async function playConsentSheet(event) {
       masterStopPhase !== "clear"
     ) {
       releaseNativePresentation(presentation);
+      if (request !== voiceRequest) return;
+      if (consentReadingRequest === request) consentReadingRequest = null;
+      paintConsentListen();
       return;
     }
   } catch (error) {
     releaseNativePresentation(presentation);
+    if (request !== voiceRequest) return;
+    if (consentReadingRequest === request) consentReadingRequest = null;
+    paintConsentListen();
     consentResult.textContent = `現在不能朗讀：${String(error?.message ?? error)}`;
     consentResult.classList.add("bad");
     return;
@@ -2264,38 +2349,47 @@ async function playConsentSheet(event) {
   bundledVoicePresentation = presentation;
   personaAudio.currentTime = 0;
   let finished = false;
+  const playGen = armMediaPlay();
   const finish = () => {
     if (finished) return;
     finished = true;
-    if (request === voiceRequest) setPersonaSpeaking(PERSONA_SPEAKING_FIXED, false);
+    if (request === voiceRequest && currentMediaPlayGen === playGen) {
+      setPersonaSpeaking(PERSONA_SPEAKING_FIXED, false);
+    }
     if (consentReadingRequest === request) {
       consentReadingRequest = null;
       paintConsentListen();
     }
-    personaAudio.onended = null;
-    personaAudio.onerror = null;
-    personaAudio.removeAttribute?.("src");
+    const ours = currentMediaPlayGen === playGen || currentMediaPlayGen === null;
+    if (currentMediaPlayGen === playGen) currentMediaPlayGen = null;
+    if (ours) {
+      personaAudio.onended = null;
+      personaAudio.onerror = null;
+      personaAudio.removeAttribute?.("src");
+    }
     if (bundledVoicePresentation === presentation) bundledVoicePresentation = null;
     releaseNativePresentation(presentation);
   };
   personaAudio.onended = finish;
-  personaAudio.onerror = () => {
+  const playbackFailed = () => {
+    const ours = request === voiceRequest && currentMediaPlayGen === playGen && !finished;
     finish();
-    if (request === voiceRequest) {
-      consentResult.textContent = "這段本機錄音播放失敗；可以直接讀文字後回答。";
+    if (ours) {
+      consentResult.textContent = CONSENT_LISTEN_FAILED;
       consentResult.classList.add("bad");
     }
   };
+  personaAudio.onerror = playbackFailed;
   personaAudio.src = clip.file;
   try {
     await personaAudio.play();
-    if (request === voiceRequest && !finished) {
-      setPersonaSpeaking(PERSONA_SPEAKING_FIXED, true);
-      consentReadingRequest = request;
-      paintConsentListen();
+    if (settleMediaPlay(playGen) !== "ours" || request !== voiceRequest || finished) {
+      if (!finished) finish();
+      return;
     }
+    setPersonaSpeaking(PERSONA_SPEAKING_FIXED, true);
   } catch {
-    personaAudio.onerror?.();
+    playbackFailed();
   }
 }
 
@@ -3524,11 +3618,24 @@ function overtakenByRecordingChange() {
  * 借 [`noticeAboutSomethingElse`] 而不是自己寫一格：這正是它的定義——他手指剛剛
  * 按下去的那一下沒成。主詞也要對，開不起來的是那扇視窗，不是她。
  */
+let frameOpenRequest = 0;
+
 function openFrame(frameId) {
-  void invoke?.("open_frame", { frameId })?.catch?.((err) => {
-    noticeAboutSomethingElse(`當時的畫面打不開：${String(err?.message ?? err)}`);
-    paint();
-  });
+  const request = (frameOpenRequest += 1);
+  void invoke?.("open_frame", { frameId })?.then?.(
+    () => {
+      if (request !== frameOpenRequest) return;
+      if (notice?.text?.startsWith(FRAME_OPEN_FAILED_PREFIX)) {
+        notice = null;
+        paint();
+      }
+    },
+    (err) => {
+      if (request !== frameOpenRequest) return;
+      noticeAboutSomethingElse(`${FRAME_OPEN_FAILED_PREFIX}${String(err?.message ?? err)}`);
+      paint();
+    },
+  );
 }
 
 /**
@@ -4870,6 +4977,9 @@ function answerReadLine() {
     }
     const text = answerTextForLocalSpeech();
     if (text === "") return;
+    // 鍵面在 admit 還在飛的時候就要寫停止，否則 pending 期間再按一下會開第二段。
+    localAnswerButton = button;
+    button.textContent = ANSWER_READ_STOP;
     if (invoke === null) {
       if (speakWithLocalSystemVoice(text, null, button)) return;
     } else {
@@ -4884,20 +4994,29 @@ function answerReadLine() {
           masterStopPhase !== "clear"
         ) {
           releaseNativePresentation(presentation);
-          if (localIntent === localSpeechRevision) readMasterStopState();
+          if (localIntent !== localSpeechRevision) return;
+          resetLocalAnswerButton();
+          if (masterStopPhase !== "clear") {
+            personaLine.textContent = "本機朗讀未開始。解除全停後再重播。";
+            personaLine.hidden = false;
+            readMasterStopState();
+          }
           return;
         }
         if (speakWithLocalSystemVoice(text, presentation, button)) return;
         releaseNativePresentation(presentation);
       } catch (error) {
         releaseNativePresentation(presentation);
-        if (localIntent !== localSpeechRevision || masterStopPhase !== "clear") return;
+        if (localIntent !== localSpeechRevision) return;
+        resetLocalAnswerButton();
+        if (masterStopPhase !== "clear") return;
         personaLine.textContent = "本機朗讀未開始。解除全停後再重播。";
         personaLine.hidden = false;
         readMasterStopState();
         return;
       }
     }
+    resetLocalAnswerButton();
     personaLine.textContent = "找不到本機中文語音。請先在 Windows 安裝中文語音。";
     personaLine.hidden = false;
   });
@@ -5029,17 +5148,19 @@ async function speakAzureAnswer(button, intent) {
   // 還在 WebView 的本機 media pipeline 裡。ended／error／Stop 才是這份 activity
   // 真正排乾；window/process teardown 則由 native 一次清掉。
   azurePlaybackPresentation = audio;
+  const playGen = armMediaPlay();
   let playbackFinished = false;
   const playbackFailed = () => {
-    if (revision !== azureSpeechRevision || playbackFinished) return;
+    if (revision !== azureSpeechRevision || currentMediaPlayGen !== playGen || playbackFinished) return;
     playbackFinished = true;
+    currentMediaPlayGen = null;
     setPersonaSpeaking(PERSONA_SPEAKING_AZURE, false);
     resetAzureAnswerButton();
     personaAudio.onerror = null;
     personaAudio.onended = null;
     personaAudio.removeAttribute?.("src");
     releaseAzurePlaybackPresentation(audio);
-    personaLine.textContent = "Azure 音訊播放失敗。請再重播一次。";
+    personaLine.textContent = AZURE_READ_FAILED;
     personaLine.hidden = false;
   };
   personaAudio.onerror = playbackFailed;
@@ -5048,10 +5169,12 @@ async function speakAzureAnswer(button, intent) {
   personaAudio.currentTime = 0;
   personaAudio.src = audio.data_url;
   personaAudio.onended = () => {
-    if (revision !== azureSpeechRevision || playbackFinished) return;
+    if (revision !== azureSpeechRevision || currentMediaPlayGen !== playGen || playbackFinished) return;
     playbackFinished = true;
+    currentMediaPlayGen = null;
     setPersonaSpeaking(PERSONA_SPEAKING_AZURE, false);
     resetAzureAnswerButton();
+    if (currentMediaPlayGen === playGen) currentMediaPlayGen = null;
     personaAudio.onerror = null;
     personaAudio.onended = null;
     personaAudio.removeAttribute?.("src");
@@ -5059,9 +5182,10 @@ async function speakAzureAnswer(button, intent) {
   };
   try {
     await personaAudio.play();
-    if (revision === azureSpeechRevision && !playbackFinished) {
-      setPersonaSpeaking(PERSONA_SPEAKING_AZURE, true);
+    if (settleMediaPlay(playGen) !== "ours" || revision !== azureSpeechRevision || playbackFinished) {
+      return;
     }
+    setPersonaSpeaking(PERSONA_SPEAKING_AZURE, true);
   } catch {
     playbackFailed();
   }
@@ -5814,6 +5938,7 @@ async function ask(event = null) {
   stopPersonaMedia();
 
   const mine = ++asking;
+  frameOpenRequest += 1;
   // 新的一題蓋掉上一次那句「為什麼沒成」——他已經在做下一件事了。
   notice = null;
   setState("thinking");

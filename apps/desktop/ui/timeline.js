@@ -127,10 +127,26 @@ function tell(message, bad = false) {
  * 一次性的失敗換掉一句持續為真的話；`tell` 那一格本來就是「他手指剛剛按下去的
  * 那一下」的回條（忘掉那顆鍵在用），換一天、換一頁自己會清掉。
  */
+const FRAME_OPEN_FAILED_PREFIX = "當時的畫面打不開：";
+let frameOpenRequest = 0;
+
+function invalidateFrameOpen() {
+  frameOpenRequest += 1;
+  if ((el.say.textContent ?? "").startsWith(FRAME_OPEN_FAILED_PREFIX)) tell("");
+}
+
 function openFrame(frameId) {
-  void invoke?.("open_frame", { frameId })?.catch?.((err) => {
-    tell(`當時的畫面打不開：${String(err?.message ?? err)}`, true);
-  });
+  const request = (frameOpenRequest += 1);
+  void invoke?.("open_frame", { frameId })?.then?.(
+    () => {
+      if (request !== frameOpenRequest) return;
+      if ((el.say.textContent ?? "").startsWith(FRAME_OPEN_FAILED_PREFIX)) tell("");
+    },
+    (err) => {
+      if (request !== frameOpenRequest) return;
+      tell(`${FRAME_OPEN_FAILED_PREFIX}${String(err?.message ?? err)}`, true);
+    },
+  );
 }
 
 /**
@@ -1123,6 +1139,7 @@ for (const input of [el.from, el.to]) {
 // ---------- 讀 ----------
 
 async function openDay(day, button) {
+  invalidateFrameOpen();
   for (const b of el.days.querySelectorAll("button")) {
     b.setAttribute("aria-current", String(b === button));
   }
@@ -1182,6 +1199,7 @@ function listDays(days) {
  * 就不該再出現在左邊——一個點下去空空如也的日期，會讓人以為刪除失敗了。
  */
 function setView(next) {
+  invalidateFrameOpen();
   view = next;
   if (el.views) {
     for (const btn of el.views.querySelectorAll("[data-view]")) {
@@ -1631,6 +1649,7 @@ function pledgeRow(c) {
 }
 
 async function load(keep = null) {
+  invalidateFrameOpen();
   if (invoke === null) {
     el.railSay.textContent = "這一頁不是在 AI-Sister 裡打開的。";
     el.forget.disabled = true;

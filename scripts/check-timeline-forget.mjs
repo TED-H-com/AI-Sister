@@ -766,6 +766,79 @@ console.log("⑫ 「看當時的畫面」開不起來的時候，這一頁要說
    *   拿 `want=綠` 的刀量過，不是推出來的。 */
 }
 
+console.log("⑫b 同一顆「看當時的畫面」失敗後重開，晚到的失敗不准蓋掉後來的成功");
+{
+  const press = async (button) => {
+    for (const fn of button.handlers.click ?? []) fn();
+    await tick();
+  };
+  const BOOM = "TIMELINE_OPEN_FRAME_FIRST_FAIL";
+  let opens = 0;
+  const page = await open({
+    open_frame: () => {
+      opens += 1;
+      if (opens === 1) throw new Error(BOOM);
+      return null;
+    },
+  });
+  const button = page.node("[data-moments]").querySelector(".see");
+  await press(button);
+  check(
+    "第一次開不起來說一聲",
+    page.say().includes("打不開") && page.say().includes(BOOM),
+    page.say(),
+  );
+  await press(button);
+  check("再按成功後那句失敗收掉", page.say() === "" && opens === 2, {
+    say: page.say(),
+    opens,
+  });
+
+  let finishLate = null;
+  let lateOpens = 0;
+  const late = await open({
+    open_frame: () => {
+      lateOpens += 1;
+      if (lateOpens === 1) {
+        return new Promise((_, reject) => {
+          finishLate = () => reject(new Error("TIMELINE_OPEN_FRAME_LATE_FAIL"));
+        });
+      }
+      return null;
+    },
+  });
+  const lateButton = late.node("[data-moments]").querySelector(".see");
+  await press(lateButton);
+  await press(lateButton);
+  check("第二下已成功時不多嘴", late.say() === "", late.say());
+  finishLate?.();
+  await tick();
+  await tick();
+  check(
+    "較早那一次晚到的失敗不准蓋掉後來的成功",
+    late.say() === "" && !late.say().includes("LATE_FAIL"),
+    late.say(),
+  );
+
+  for (const navigate of ["day", "view"]) {
+    let rejectOld;
+    const moved = await open({
+      open_frame: () => new Promise((_, reject) => { rejectOld = reject; }),
+    });
+    await press(moved.node("[data-moments]").querySelector(".see"));
+    if (navigate === "day") await moved.pickDay(1);
+    else {
+      const button = { getAttribute: (name) => name === "data-view" ? "guess" : null };
+      const event = { target: { closest: (selector) => selector === "[data-view]" ? button : null } };
+      for (const fn of moved.node("[data-views]").handlers.click ?? []) fn(event);
+      await tick();
+    }
+    rejectOld(new Error("PREVIOUS_PAGE_FRAME_FAILED"));
+    await tick();
+    check(`換${navigate}後舊出處失敗不回到新頁`, !moved.say().includes("PREVIOUS_PAGE"), moved.say());
+  }
+}
+
 console.log("⑬ 六顆寫入鍵：寫不進去的時候，不准長得像成功");
 {
   // ⑫ 守的是**讀**失敗（那扇視窗沒開起來）。這六顆是**寫**，後果重得多：Rust 回
@@ -794,8 +867,9 @@ console.log("⑬ 六顆寫入鍵：寫不進去的時候，不准長得像成功
   const dropped = productLines.filter(([, line]) => line.includes("void invoke"));
   check("這一頁只剩一個地方把 invoke 的結果丟在地上", dropped.length === 1, dropped);
   check(
-    "而那一個是 openFrame，它自己接了 .catch",
-    (dropped[0]?.[1] ?? "").includes("open_frame") && (dropped[0]?.[1] ?? "").includes(".catch"),
+    "而那一個是 openFrame，它自己接了成功／失敗兩臂",
+    (dropped[0]?.[1] ?? "").includes("open_frame") &&
+      (dropped[0]?.[1] ?? "").includes(".then"),
     dropped[0],
   );
   // 章節那三個指令各有兩個呼叫端（活動級和分鐘級），所以是 2 不是 1——數字寫死在

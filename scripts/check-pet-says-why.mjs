@@ -354,6 +354,9 @@ async function open(
     browserOnly = false,
     consentVoices = null,
     systemVoices = null,
+    holdPlay = false,
+    holdFirstPlay = false,
+    personaVoices = null,
   } = {},
 ) {
   // `domOf` 只生得出 index.html 上真的有的東西——見 fake-dom.mjs 開頭那段。
@@ -396,8 +399,14 @@ async function open(
     if (name === "src") playbackTrace.push("remove-src");
     removeAudioAttribute(name);
   };
+  let playHold = null;
   audio.play = async () => {
     audioPlays += 1;
+    playbackTrace.push("play");
+    if (!holdPlay && !(holdFirstPlay && audioPlays === 1)) return;
+    await new Promise((resolve, reject) => {
+      playHold = { resolve, reject };
+    });
   };
 
   globalThis.document = fakeDocument(node, {
@@ -455,6 +464,7 @@ async function open(
     return id;
   };
   globalThis.clearInterval = (id) => nativeClearInterval(id);
+  globalThis.__AI_SISTER_PERSONA_VOICES__ = personaVoices;
   if (consentVoices === null) delete globalThis.__AI_SISTER_CONSENT_VOICES__;
   else globalThis.__AI_SISTER_CONSENT_VOICES__ = consentVoices;
 
@@ -563,6 +573,16 @@ async function open(
     },
     failAudio() {
       audio.onerror?.();
+    },
+    audioSrc: () => audio.src,
+    holdPlayPending: () => playHold !== null,
+    async releasePlay(error) {
+      const hold = playHold;
+      playHold = null;
+      if (!hold) return;
+      if (error) hold.reject(error);
+      else hold.resolve();
+      await tick();
     },
     localSpeaks: () => localSpeaks,
     urlPolicy: () => node("[data-url-policy]"),
@@ -4934,6 +4954,383 @@ console.log("91. 「去開當時的畫面」開不起來的時候，這一頁要
    *      `check-timeline-forget.mjs` ⑫——**不是這一節**。
    *
    * 兩條都拿 `want=綠` 的刀量過，不是推出來的。 */
+}
+
+console.log("92. 停止、晚到的 play()、失敗後重按、重開出處、trusted 手勢");
+{
+  const consentFixture = {
+    consent_read: consentView([false, false, false, false], [false, false, false, false]),
+    persona_fixed_voice_admit: { presentation_id: "consent-voice" },
+    master_stop_presentation_begin: true,
+    master_stop_presentation_end: null,
+  };
+  const playLabel = /const CONSENT_LISTEN_PLAY = "([^"]+)";/u.exec(read(SRC))?.[1] ?? null;
+  const stopLabel = /const CONSENT_LISTEN_STOP = "([^"]+)";/u.exec(read(SRC))?.[1] ?? null;
+  const failedLabel = /const CONSENT_LISTEN_FAILED = "([^"]+)";/u.exec(read(SRC))?.[1] ?? null;
+  const personaLineOf = (view) => {
+    const el = view.node("[data-persona-line]");
+    return el.hidden ? "" : el.textContent;
+  };
+
+  {
+    const pending = await open(consentFixture, {
+      consentVoices: consentVoiceManifest(),
+      holdPlay: true,
+    });
+    await pending.clickElement(pending.consentListen());
+    check(
+      "play() 還在飛的時候，鍵面已經是停止",
+      pending.holdPlayPending() &&
+        pending.consentListen().textContent === stopLabel &&
+        !pending.isSpeaking(),
+      {
+        pending: pending.holdPlayPending(),
+        label: pending.consentListen().textContent,
+        speaking: pending.isSpeaking(),
+      },
+    );
+    const pausesBefore = pending.audioPauses();
+    await pending.clickElement(pending.consentListen(), { trusted: false });
+    check(
+      "pending 期間的合成 click 不停、不重播",
+      pending.holdPlayPending() &&
+        pending.audioPlays() === 1 &&
+        pending.audioPauses() === pausesBefore &&
+        pending.consentListen().textContent === stopLabel,
+      {
+        plays: pending.audioPlays(),
+        pauses: pending.audioPauses(),
+        label: pending.consentListen().textContent,
+      },
+    );
+    await pending.clickElement(pending.consentListen());
+    check(
+      "pending 期間再按一下是停止，不是再開一段",
+      pending.holdPlayPending() &&
+        pending.audioPlays() === 1 &&
+        pending.audioPauses() > pausesBefore &&
+        pending.consentListen().textContent === playLabel &&
+        pending.consentResult().includes("已停止"),
+      {
+        plays: pending.audioPlays(),
+        pauses: pending.audioPauses(),
+        label: pending.consentListen().textContent,
+        said: pending.consentResult(),
+        pendingPlay: pending.holdPlayPending(),
+      },
+    );
+    const srcAfterStop = pending.audioSrc();
+    await pending.releasePlay();
+    check(
+      "晚到的 play() 不准把已停止的錄音再點著",
+      !pending.isSpeaking() &&
+        pending.audioPlays() === 1 &&
+        pending.consentListen().textContent === playLabel &&
+        (pending.audioSrc() === "" || pending.audioSrc() === srcAfterStop),
+      {
+        speaking: pending.isSpeaking(),
+        plays: pending.audioPlays(),
+        src: pending.audioSrc(),
+        label: pending.consentListen().textContent,
+      },
+    );
+  }
+
+  {
+    const failed = await open(consentFixture, { consentVoices: consentVoiceManifest() });
+    await failed.clickElement(failed.consentListen());
+    failed.failAudio();
+    await tick();
+    check(
+      "前提：失敗那句還在，鍵回到念給我聽",
+      failed.consentResult() === failedLabel &&
+        failed.consentListen().textContent === playLabel,
+      { said: failed.consentResult(), label: failed.consentListen().textContent },
+    );
+    await failed.clickElement(failed.consentListen());
+    check(
+      "失敗後再按，那句失敗自己消失，而且真的在念",
+      failed.audioPlays() === 2 &&
+        failed.consentListen().textContent === stopLabel &&
+        failed.consentResult() === "",
+      {
+        plays: failed.audioPlays(),
+        label: failed.consentListen().textContent,
+        said: failed.consentResult(),
+      },
+    );
+  }
+
+  {
+    const ZH_TW_VOICE = [{ name: "Hanhan", lang: "zh-TW", localService: true }];
+    const localFailed = /const ANSWER_READ_FAILED = "([^"]+)";/u.exec(read(SRC))?.[1] ?? null;
+    const localStop = /const ANSWER_READ_STOP = "([^"]+)";/u.exec(read(SRC))?.[1] ?? null;
+    let speaks = 0;
+    const view = await open(
+      {
+        persona_read: { id: "chatgpt", enabled: true, motion: true, tap_lines: true, voice_enabled: true },
+        ask: answer({ hits: [hit({ snippet: "READ_ME" })] }),
+        recording_state: "recording",
+      },
+      { systemVoices: ZH_TW_VOICE },
+    );
+    const originalSpeak = globalThis.speechSynthesis.speak;
+    globalThis.speechSynthesis.speak = function speakWithError(utterance) {
+      speaks += 1;
+      if (speaks === 1) {
+        queueMicrotask(() => utterance?.onerror?.());
+        return;
+      }
+      return originalSpeak.call(this, utterance);
+    };
+    await view.type("念這一段");
+    await view.clickElement(view.localReadButton());
+    await tick();
+    check(
+      "本機朗讀失敗要說出來",
+      personaLineOf(view) === localFailed &&
+        view.localReadButton().textContent.includes("用本機聲音朗讀"),
+      { line: personaLineOf(view), label: view.localReadButton()?.textContent },
+    );
+    await view.clickElement(view.localReadButton());
+    check(
+      "失敗後再按，失敗句收掉，鍵面是停止",
+      personaLineOf(view) === "" && view.localReadButton().textContent === localStop,
+      { line: personaLineOf(view), label: view.localReadButton()?.textContent, speaks },
+    );
+  }
+
+  {
+    const azureFailed = /const AZURE_READ_FAILED = "([^"]+)";/u.exec(read(SRC))?.[1] ?? null;
+    const azureStop = /const AZURE_READ_STOP = "([^"]+)";/u.exec(read(SRC))?.[1] ?? null;
+    const azurePlay = /const AZURE_READ_PLAY = "([^"]+)";/u.exec(read(SRC))?.[1] ?? null;
+    const pending = await open(
+      {
+        azure_tts_read: AZURE_READY,
+        azure_tts_speak: ({ expected }) => ({
+          generation: expected.generation + 1,
+          content_type: "audio/mpeg",
+          audio_bytes: 3,
+          data_url: "data:audio/mpeg;base64,AQID",
+          presentation_id: `880${expected.generation}`,
+        }),
+        ask: answer({ hits: [hit({ snippet: "PLAY_ME" })] }),
+        recording_state: "recording",
+      },
+      { holdPlay: true },
+    );
+    await pending.type("播放");
+    check(
+      "新答案自動送出後，play() 未 resolve 前鍵面已是停止",
+      pending.holdPlayPending() &&
+        pending.azureButton()?.textContent === azureStop &&
+        !pending.isSpeaking(),
+      {
+        pending: pending.holdPlayPending(),
+        label: pending.azureButton()?.textContent,
+        speaking: pending.isSpeaking(),
+      },
+    );
+    await pending.clickElement(pending.azureButton());
+    check(
+      "pending Azure 再按是停止",
+      pending.azureButton()?.textContent === azurePlay &&
+        personaLineOf(pending).includes("已停止"),
+      {
+        label: pending.azureButton()?.textContent,
+        line: personaLineOf(pending),
+      },
+    );
+    await pending.releasePlay();
+    check(
+      "晚到的 Azure play() 不准再出聲",
+      !pending.isSpeaking() && pending.azureButton()?.textContent === azurePlay,
+      {
+        speaking: pending.isSpeaking(),
+        label: pending.azureButton()?.textContent,
+        src: pending.audioSrc(),
+      },
+    );
+
+    const replay = await open(
+      {
+        azure_tts_read: AZURE_READY,
+        azure_tts_speak: ({ expected }) => ({
+          generation: expected.generation + 1,
+          content_type: "audio/mpeg",
+          audio_bytes: 3,
+          data_url: "data:audio/mpeg;base64,AQID",
+          presentation_id: `990${expected.generation}`,
+        }),
+        ask: answer({ hits: [hit({ snippet: "PLAY_ME" })] }),
+        recording_state: "recording",
+      },
+    );
+    await replay.type("播放");
+    replay.failAudio();
+    await tick();
+    check(
+      "Azure 播放失敗要說出來",
+      personaLineOf(replay) === azureFailed,
+      personaLineOf(replay),
+    );
+    await replay.clickElement(replay.azureButton());
+    check(
+      "Azure 失敗後再按，失敗句收掉",
+      personaLineOf(replay) === "" && replay.azureButton()?.textContent === azureStop,
+      { line: personaLineOf(replay), label: replay.azureButton()?.textContent },
+    );
+  }
+
+  for (const kind of ["consent", "fixed", "azure"]) {
+    for (const replay of [false, true]) {
+      const table = kind === "consent" ? consentFixture : {
+        persona_read: { id: "chatgpt", enabled: true, motion: true, tap_lines: true, voice_enabled: true },
+        persona_fixed_voice_admit: { presentation_id: "fixed-rejection" },
+        master_stop_presentation_begin: true,
+        master_stop_presentation_end: null,
+        recording_state: "recording",
+        ask: answer({ hits: [hit({ snippet: "LATE_REJECTION" })] }),
+        ...(kind === "azure" ? {
+          azure_tts_read: AZURE_READY,
+          azure_tts_speak: ({ expected }) => ({
+            generation: expected.generation + 1,
+            content_type: "audio/mpeg", audio_bytes: 3,
+            data_url: "data:audio/mpeg;base64,AQID",
+            presentation_id: `rejection-${expected.generation}`,
+          }),
+        } : {}),
+      };
+      const view = await open(table, {
+        holdFirstPlay: true,
+        consentVoices: kind === "consent" ? consentVoiceManifest() : null,
+        personaVoices: kind === "fixed"
+          ? JSON.parse(read(join(UI, "persona-voices/v1/manifest.json"))) : null,
+      });
+      if (kind === "azure") await view.type("播放");
+      else await view.clickElement(kind === "consent" ? view.consentListen() : view.node("[data-avatar]"));
+      check(`${kind} 過期 rejection 前提：第一段 play 正在等`, view.holdPlayPending());
+      if (kind === "consent") await view.clickElement(view.consentListen());
+      else if (kind === "azure") await view.clickElement(view.azureButton());
+      else await view.type("切換問題讓台詞停止");
+      if (replay) {
+        await view.clickElement(kind === "consent" ? view.consentListen()
+          : kind === "azure" ? view.azureButton() : view.node("[data-avatar]"));
+        check(`${kind} 第二段已開始`, view.audioPlays() === 2 && view.isSpeaking());
+      }
+      const before = {
+        line: personaLineOf(view), consent: view.consentResult(),
+        speaking: view.isSpeaking(), src: view.audioSrc(),
+      };
+      await view.releasePlay(new Error("OLD_PLAY_REJECTION"));
+      check(`${kind} 舊 play 拒絕不改動${replay ? "後一段播放" : "停止狀態"}`,
+        view.isSpeaking() === before.speaking && view.audioSrc() === before.src &&
+        personaLineOf(view) === before.line && view.consentResult() === before.consent,
+        { before, after: { line: personaLineOf(view), consent: view.consentResult(),
+          speaking: view.isSpeaking(), src: view.audioSrc() } });
+    }
+  }
+
+  {
+    const sourceAsk = {
+      ask: answer({
+        query_id: 7007,
+        answers: [fact({ frame_id: 42, chunk_id: 31 })],
+        hits: [hit({ chunk_id: 77, frame_id: 84, snippet: "隨便一段原文" })],
+        synthesis: {
+          sentences: [
+            {
+              text: "客服電話是 0800-080-123。",
+              sources: [{ ref: "fact:9", label: "畫面 #42", frame_id: 42 }],
+            },
+          ],
+        },
+      }),
+      recording_state: "recording",
+    };
+    const BOOM = "OPEN_FRAME_FIRST_BLEW_UP";
+    let opens = 0;
+    const view = await open({
+      ...sourceAsk,
+      open_frame: () => {
+        opens += 1;
+        if (opens === 1) throw new Error(BOOM);
+        return null;
+      },
+    });
+    await view.type("客服電話");
+    const button = view.hits().querySelector(".grounded-source");
+    await view.clickElement(button);
+    check(
+      "出處第一次開不起來說一聲",
+      view.line().includes("打不開") && view.line().includes(BOOM),
+      view.line(),
+    );
+    await view.clickElement(button);
+    check(
+      "同一顆出處再按成功後，失敗句收掉",
+      !view.line().includes("打不開") && opens === 2,
+      { line: view.line(), opens },
+    );
+
+    let finishLate = null;
+    let lateOpens = 0;
+    const late = await open({
+      ...sourceAsk,
+      open_frame: () => {
+        lateOpens += 1;
+        if (lateOpens === 1) {
+          return new Promise((_, reject) => {
+            finishLate = () => reject(new Error("OPEN_FRAME_LATE_FAIL"));
+          });
+        }
+        return null;
+      },
+    });
+    await late.type("客服電話");
+    const lateButton = late.hits().querySelector(".grounded-source");
+    await late.clickElement(lateButton);
+    await late.clickElement(lateButton);
+    check("第二下已成功時畫面不多嘴", !late.line().includes("打不開"), late.line());
+    finishLate?.();
+    await tick();
+    await tick();
+    check(
+      "較早那一次晚到的失敗不准蓋掉後來的成功",
+      !late.line().includes("打不開") && !late.line().includes("LATE_FAIL"),
+      late.line(),
+    );
+    let rejectOldFrame;
+    const nextQuestion = await open({
+      ...sourceAsk,
+      open_frame: () => new Promise((_, reject) => { rejectOldFrame = reject; }),
+    });
+    await nextQuestion.type("第一題");
+    await nextQuestion.clickElement(nextQuestion.hits().querySelector(".grounded-source"));
+    await nextQuestion.type("第二題");
+    rejectOldFrame(new Error("PREVIOUS_QUESTION_FRAME_FAILED"));
+    await tick();
+    check("換題後舊出處失敗不回到新答案", !nextQuestion.line().includes("PREVIOUS_QUESTION"), nextQuestion.line());
+
+    const otherNotice = await open({
+      ...sourceAsk,
+      open_timeline: new Error("時間軸這一下開不起來"),
+      open_frame: null,
+    });
+    await otherNotice.type("客服電話");
+    await otherNotice.click("#timeline");
+    check(
+      "前提：畫面上是時間軸那句無關回條",
+      otherNotice.line().includes("時間軸這一下"),
+      otherNotice.line(),
+    );
+    await otherNotice.clickElement(otherNotice.hits().querySelector(".grounded-source"));
+    check(
+      "出處開成功不准清掉不是畫面的回條",
+      otherNotice.line().includes("時間軸這一下") && !otherNotice.line().includes("打不開"),
+      otherNotice.line(),
+    );
+  }
 }
 
 /* 上面那幾行把 `diagnose_note` 從 `calls` 濾掉了。濾掉和刪掉偵測器只差一步，
