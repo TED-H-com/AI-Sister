@@ -2005,6 +2005,45 @@ console.log("㉚⁰ᵉ 本機台灣語音寫入飛行中的重讀要排隊，完
   );
 }
 
+console.log("㉚⁰ᵍ 本機台灣語音重畫丟例外後，忙旗標要放下，下一輪才讀得到");
+{
+  const readyOff = localTtsCase("ready", false, true);
+  const page = await open({ localTts: readyOff });
+  const stateEl = page.node("[data-local-tts-state]");
+  const original = Object.getOwnPropertyDescriptor(stateEl, "textContent");
+  let thrown = false;
+  Object.defineProperty(stateEl, "textContent", {
+    configurable: true,
+    get() {
+      return original.get.call(stateEl);
+    },
+    set(value) {
+      if (!thrown) {
+        thrown = true;
+        throw new Error("paint once");
+      }
+      return original.set.call(stateEl, value);
+    },
+  });
+  page.node("[data-local-tts-enabled]").checked = true;
+  await page.act("[data-local-tts-enabled]", { event: "change" });
+  const afterSave = stateEl.textContent;
+  check("前提：重畫那一步真的丟了一次", thrown === true);
+  check(
+    "保存成功後重畫失敗，不改口成沒有保存",
+    !afterSave.includes("沒有保存"),
+    afterSave,
+  );
+  const before = calls(page, "local_tts_read").length;
+  await page.emit("local-tts-changed");
+  const after = calls(page, "local_tts_read").length;
+  check(
+    "重畫丟過一次後，下一次 local-tts-changed 真的讀了",
+    after === before + 1,
+    { before, after },
+  );
+}
+
 console.log("㉚⁰ᶠ 讀不出設定時 voice_enabled 只能是 null");
 {
   const unreadable = {
@@ -2529,6 +2568,7 @@ console.log("㉜ Usage 沒查過、上一份、即時、全停是四句");
     config_readable: true,
     config_error: null,
     fetch_error: null,
+    served_from: "network",
     board_live: true,
     last_success_unix_ms: 1_757_644_836_000,
     products: [
@@ -2600,6 +2640,7 @@ console.log("㉜ Usage 沒查過、上一份、即時、全停是四句");
     config_readable: true,
     config_error: null,
     fetch_error: null,
+    served_from: "network",
     board_live: true,
     products: [
       {
@@ -2639,6 +2680,80 @@ console.log("㉜ Usage 沒查過、上一份、即時、全停是四句");
     missedText,
   );
   check("兩種零不是同一句", emptyText !== missedText, { emptyText, missedText });
+}
+
+console.log("㊲ Usage 即時只在這次問過網路；磁碟回想要帶查到時間");
+{
+  const p = await open();
+  async function paint(patch) {
+    p.setUsage(patch);
+    await p.emit("usage-status-changed");
+    return p.node("[data-usage-state]").textContent;
+  }
+  const base = {
+    enabled: true,
+    stopped: false,
+    config_readable: true,
+    config_error: null,
+    fetch_error: null,
+    board_live: true,
+    products: [],
+    local_products: [],
+  };
+  const network = await paint({
+    ...base,
+    served_from: "network",
+    last_success_unix_ms: 1_757_644_836_000,
+  });
+  const cached = await paint({
+    ...base,
+    served_from: "cache",
+    last_success_unix_ms: 1_757_644_836_000,
+    board_updated_at: "1999-01-01T00:00:00.000Z",
+  });
+  const cachedNoTime = await paint({
+    ...base,
+    served_from: "cache",
+    last_success_unix_ms: null,
+    board_updated_at: "1999-01-01T00:00:00.000Z",
+  });
+  const never = await paint({
+    ...base,
+    served_from: "cache",
+    board_live: false,
+    last_success_unix_ms: null,
+    board_updated_at: null,
+  });
+  check("network 才說即時", network.includes("即時"), network);
+  check(
+    "cache 有時間不說即時，而且帶 UTC 時鐘",
+    !cached.includes("即時") && cached.includes("2025-09-12 02:40 UTC"),
+    cached,
+  );
+  check(
+    "cache 沒時間不說即時，也不是還沒查過",
+    !cachedNoTime.includes("即時") &&
+      !cachedNoTime.includes("還沒查過") &&
+      cachedNoTime.includes("查到過") &&
+      cachedNoTime.includes("沒有記下時間") &&
+      cachedNoTime !== never &&
+      !cachedNoTime.includes("1999-01-01"),
+    cachedNoTime,
+  );
+  const three = [
+    ["network", network],
+    ["cache", cached],
+    ["cache 沒時間", cachedNoTime],
+  ];
+  for (let i = 0; i < three.length; i++) {
+    for (let j = i + 1; j < three.length; j++) {
+      check(
+        `${three[i][0]} 和 ${three[j][0]} 不是同一句`,
+        three[i][1] !== three[j][1],
+        { a: three[i][1], b: three[j][1] },
+      );
+    }
+  }
 }
 
 console.log("㉝ Usage 設定讀不出來和看板狀態檔讀不出來不是同一句");
