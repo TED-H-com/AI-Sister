@@ -264,6 +264,49 @@ fn pause_or_context_change_during_assistive_read_discards_text_and_frame() {
 }
 
 #[test]
+fn latched_master_stop_never_reads_assistive_text() {
+    for role in ["edit", "document"] {
+        let dir = std::env::temp_dir().join(format!(
+            "sister-assistive-stop-{role}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        sister_hands::master_stop::engage(&dir, 1).unwrap();
+        let mut source = focus();
+        source.role = role;
+        let calls = source.calls.clone();
+        let mut rec = Recorder::new(
+            CompositeBackend {
+                name: "assistive fixture".into(),
+                system: System,
+                screen: Screen,
+                focus: source,
+                clipboard: NullClipboard,
+                input: NullInput,
+                ocr: NullOcr,
+            },
+            Db::open_in_memory().unwrap(),
+            Config::default(),
+            None,
+            MasterStopSource::Latch(dir.clone()),
+        )
+        .unwrap();
+        assert_eq!(rec.tick(1000).unwrap(), Tick::MasterStopped);
+        assert_eq!(calls.get(), 0, "{role}");
+        assert_eq!(rec.timings().assistive.calls, 0, "{role}");
+        assert!(rec.db().search("receipt", 10).unwrap().is_empty());
+        let frames: i64 = rec
+            .db()
+            .conn()
+            .query_row("SELECT COUNT(*) FROM frames", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(frames, 0);
+        drop(rec);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
 fn losing_assistive_text_refreshes_ocr_once_even_when_the_image_hash_matches() {
     struct DisappearingText(Focus);
     impl FocusSource for DisappearingText {

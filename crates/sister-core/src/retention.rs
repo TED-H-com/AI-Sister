@@ -260,6 +260,32 @@ fn delete_frames_except(
         .context("delete frames")? as u64)
 }
 
+/// 圖刪不掉所以整列還在的 frame，CASCADE 帶不走底下的字。
+///
+/// `forget` 和過了 `text_days` 的 `prune` 已經把 `text_chunks`／`facts` 刪掉，
+/// 搜尋會說字沒了；`ocr_blocks`、`assistive_blocks` 和畫面上的標題／網址卻
+/// 還掛在留下來的那一列上。`export_replay` 與 `assistive_blocks()` 讀的是
+/// 那幾張表，不是 FTS。列本身留下，繼續指著那張刪不掉的 PNG。
+fn strip_l0_words_from_frames(tx: &rusqlite::Transaction<'_>, ids: &[i64]) -> Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut ocr = tx.prepare("DELETE FROM ocr_blocks WHERE frame_id = ?1")?;
+    let mut assistive = tx.prepare("DELETE FROM assistive_blocks WHERE frame_id = ?1")?;
+    let mut context =
+        tx.prepare("UPDATE frames SET window_title = NULL, url = NULL WHERE id = ?1")?;
+    for id in ids {
+        ocr.execute([id]).context("strip OCR from kept frame")?;
+        assistive
+            .execute([id])
+            .context("strip assistive text from kept frame")?;
+        context
+            .execute([id])
+            .context("strip title and URL from kept frame")?;
+    }
+    Ok(())
+}
+
 /// 帶著 `session_id` 的那八張表。
 ///
 /// 寫成一份清單而不是八句 SQL：漏掉一張的下場是一列被判定成「空的」然後刪掉，
@@ -599,9 +625,11 @@ impl crate::db::Db {
         report.chunks_deleted += tx
             .execute("DELETE FROM text_chunks WHERE ts < ?1", [text_cut])
             .context("prune text_chunks")? as u64;
-        // ocr_blocks 由 frames 的 CASCADE 帶走。`kept` 是圖刪不掉的那幾列，
-        // 見上面——它們留到下一輪，不然那些 PNG 會變成孤兒。
+        // 刪得掉的 frame，ocr／assistive 由 CASCADE 帶走。`kept` 是圖刪不掉
+        // 的那幾列，CASCADE 走不到；字仍要在這一刀消失，見
+        // [`strip_l0_words_from_frames`]。
         report.frames_deleted += delete_frames_except(&tx, i64::MIN, text_cut, &kept)?;
+        strip_l0_words_from_frames(&tx, &kept)?;
         for (sql, col) in [
             ("DELETE FROM focus_events WHERE ts < ?1", "focus_events"),
             ("DELETE FROM clipboard_events WHERE ts < ?1", "clipboard"),
@@ -849,6 +877,7 @@ impl crate::db::Db {
         // 而他按的是「忘掉」——留著一個他以為已經不存在的檔案，比留著一列
         // 指向它的紀錄更糟。留下來，下一次再試，而且報告裡看得到。
         report.frames_deleted += delete_frames_except(&tx, from_ts, to_ts, &kept)?;
+        strip_l0_words_from_frames(&tx, &kept)?;
         for (sql, what) in [
             (
                 "DELETE FROM focus_events WHERE ts >= ?1 AND ts < ?2",
@@ -1180,7 +1209,7 @@ mod tests {
 
     use crate::config::RetentionConfig;
     use crate::db::Db;
-    use crate::model::{FocusSnapshot, FrameCapture, OcrBlock};
+    use crate::model::{AssistiveBlock, FocusSnapshot, FrameCapture, OcrBlock};
 
     const NOW: Millis = 1_800_000_000_000;
 
@@ -1555,6 +1584,26 @@ mod tests {
                 .expect("query");
             assert_eq!(pointed, 1, "{rel} 還在磁碟上，指向它的那一列就不能不見");
         }
+        let ocr_for = |rel: &str| -> i64 {
+            db.conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM ocr_blocks WHERE frame_id = \
+                     (SELECT id FROM frames WHERE image_path = ?1)",
+                    [rel],
+                    |r| r.get(0),
+                )
+                .expect("ocr count")
+        };
+        assert_eq!(
+            ocr_for(&paths[1]),
+            1,
+            "只過 frames_days 的字要留著，圖卡住也不能連字一起剝"
+        );
+        assert_eq!(
+            ocr_for(&paths[2]),
+            0,
+            "過了 text_days 還能從 ocr_blocks 讀到字，搜尋空了是假的"
+        );
 
         // 而且下一輪真的會再試一次——這就是留著那一列的全部意義
         for rel in [&paths[1], &paths[2]] {
@@ -1596,11 +1645,175 @@ mod tests {
             pointed, 1,
             "沒有人指得到的截圖，正是「忘掉」最不能留下的東西"
         );
+        let kept_id: i64 = db
+            .conn()
+            .query_row(
+                "SELECT id FROM frames WHERE image_path = ?1",
+                [&paths[0]],
+                |r| r.get(0),
+            )
+            .expect("kept frame id");
+        let ocr_left: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM ocr_blocks WHERE frame_id = ?1",
+                [kept_id],
+                |r| r.get(0),
+            )
+            .expect("ocr leftover");
+        assert_eq!(
+            ocr_left, 0,
+            "搜尋空了還不夠：ocr_blocks 不能靠 CASCADE 漏網"
+        );
         // 但字是真的走了：他要的那件事有做到
         assert!(
             db.search("昨天", 10).expect("search").is_empty(),
             "忘掉一段時間就該連字一起走，就算圖卡住了"
         );
+    }
+
+    /// 只清 FTS 還不算忘掉——輔助讀字另存於 `assistive_blocks`。
+    ///
+    /// `forget` 刪 `text_chunks` 之後 `search()` 會綠，但 `export_replay` 和
+    /// `assistive_blocks()` 讀的是另一張表。圖刪不掉時 CASCADE 走不到那張表。
+    #[test]
+    fn forgetting_a_stuck_screenshot_drops_assistive_words_not_just_the_search_index() {
+        let tmp = Tmp::new("stuck-forget-assistive");
+        let mut db = Db::open_in_memory().expect("db");
+        let session = db.start_session("test", "0.0.1").expect("session");
+        let rel = "2026/01/01/assistive.png";
+        let full = tmp.path().join(rel);
+        std::fs::create_dir_all(full.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&full, vec![0u8; 100]).expect("write png");
+        let ts = days_ago(1);
+        let mut capture = frame(ts, "畫面上看得到的帳單");
+        capture.focus.window_title = Some("客服電話 0800-555-0199".into());
+        capture.focus.url = Some("https://billing.example.test/secret".into());
+        capture.assistive = vec![AssistiveBlock {
+            text: "assistive phone 0800-555-0199".into(),
+            role: "edit".into(),
+            bbox: None,
+        }];
+        let (frame_id, _, _) = db
+            .insert_frame(session, &capture, Some(rel), 100)
+            .expect("insert");
+        assert_eq!(db.assistive_blocks(frame_id).expect("before").len(), 1);
+        make_undeletable(tmp.path(), rel);
+
+        let r = db
+            .forget(days_ago(2), NOW, Some(tmp.path()))
+            .expect("forget");
+        assert_eq!(r.failed.len(), 1, "{r:?}");
+        assert_eq!(r.frames_deleted, 0, "{r:?}");
+        assert!(
+            db.assistive_blocks(frame_id)
+                .expect("after forget")
+                .is_empty(),
+            "輔助讀字還掛在刪不掉的那一列上"
+        );
+        let ocr_left: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM ocr_blocks WHERE frame_id = ?1",
+                [frame_id],
+                |r| r.get(0),
+            )
+            .expect("ocr leftover");
+        assert_eq!(ocr_left, 0);
+        let (title, url): (Option<String>, Option<String>) = db
+            .conn()
+            .query_row(
+                "SELECT window_title, url FROM frames WHERE id = ?1",
+                [frame_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("frame text columns");
+        assert_eq!(title, None, "標題也是記下來的字");
+        assert_eq!(url, None, "網址也是記下來的字");
+        assert!(db.search("0800-555-0199", 10).expect("search").is_empty());
+        // Full backup must preserve the retryable image row, without reviving
+        // any forgotten OCR/assistive text when opened again.
+        let backup = tmp.path().join("forgotten-backup.db");
+        db.export_to(&backup).expect("backup");
+        let restored = Db::open(&backup).expect("reopen backup");
+        assert!(restored.assistive_blocks(frame_id).unwrap().is_empty());
+        assert!(restored.search("0800-555-0199", 10).unwrap().is_empty());
+        let (image, ocr_count, title, url): (Option<String>, i64, Option<String>, Option<String>) =
+            restored.conn().query_row(
+                "SELECT image_path, (SELECT COUNT(*) FROM ocr_blocks WHERE frame_id = frames.id), \
+                 window_title, url FROM frames WHERE id = ?1",
+                [frame_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            ).unwrap();
+        assert_eq!(image.as_deref(), Some(rel));
+        assert_eq!(ocr_count, 0);
+        assert_eq!((title, url), (None, None));
+        let draft = restored
+            .export_replay("stuck-forget", days_ago(2), NOW)
+            .expect("export")
+            .into_inner();
+        for event in &draft.events {
+            if let crate::replay::Event::Frame {
+                assistive,
+                ocr,
+                focus,
+                ..
+            } = event
+            {
+                assert!(assistive.is_empty(), "replay 還帶著輔助讀字：{assistive:?}");
+                assert!(ocr.is_empty(), "replay 還帶著 OCR：{ocr:?}");
+                assert!(focus.window_title.is_none());
+                assert!(focus.url.is_none());
+            }
+        }
+    }
+
+    /// 過了 `text_days` 而圖刪不掉時，輔助讀字也要跟 OCR 同一刀走。
+    #[test]
+    fn pruning_a_stuck_screenshot_past_text_days_drops_assistive_words() {
+        let tmp = Tmp::new("stuck-prune-assistive");
+        let mut db = Db::open_in_memory().expect("db");
+        let session = db.start_session("test", "0.0.1").expect("session");
+        let rel = "2025/01/01/old-assistive.png";
+        let full = tmp.path().join(rel);
+        std::fs::create_dir_all(full.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&full, vec![0u8; 100]).expect("write png");
+        let mut capture = frame(days_ago(400), "過期的帳單");
+        capture.assistive = vec![AssistiveBlock {
+            text: "expired assistive 02-2182-1111".into(),
+            role: "document".into(),
+            bbox: None,
+        }];
+        let (frame_id, _, _) = db
+            .insert_frame(session, &capture, Some(rel), 100)
+            .expect("insert");
+        make_undeletable(tmp.path(), rel);
+
+        db.prune(
+            NOW,
+            &RetentionConfig {
+                frames_days: 30,
+                text_days: 365,
+            },
+            Some(tmp.path()),
+        )
+        .expect("prune");
+        assert!(
+            db.assistive_blocks(frame_id)
+                .expect("after prune")
+                .is_empty(),
+            "過了文字保留期，輔助讀字不能因為圖卡住而留下"
+        );
+        assert!(db.search("02-2182-1111", 10).expect("search").is_empty());
+        let ocr_left: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM ocr_blocks WHERE frame_id = ?1",
+                [frame_id],
+                |r| r.get(0),
+            )
+            .expect("ocr leftover");
+        assert_eq!(ocr_left, 0);
     }
 
     /// **忘掉那一段，那一場錄製本身也要走。**
