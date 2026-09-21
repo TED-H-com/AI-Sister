@@ -2063,7 +2063,9 @@ impl Db {
             )?;
         }
         if let Some(url) = e.snapshot.url.as_deref().filter(|u| !u.trim().is_empty()) {
-            insert_chunk_tx(
+            // 標題會抽 facts，網址以前只進全文索引。問「昨天網址／連結／網站」
+            // 走的是 L1 型別，不是拿「網址」兩個字去比 https://…，不抽就零筆。
+            let cid = insert_chunk_tx(
                 &tx,
                 session_id,
                 e.ts,
@@ -2072,6 +2074,16 @@ impl Db {
                 None,
                 &e.snapshot,
                 url,
+            )?;
+            insert_facts_tx(
+                &tx,
+                session_id,
+                e.ts,
+                cid,
+                None,
+                SourceKind::Url,
+                &e.snapshot,
+                &crate::facts::extract(url),
             )?;
         }
 
@@ -3639,6 +3651,76 @@ impl Db {
             |row| Ok((map_fact_row(row)?, row.get::<_, i64>(11)?)),
         )?;
         Ok(rows.flatten().collect())
+    }
+
+    /// 主題先限縮來源，再挑值、數目擊。
+    ///
+    /// [`fact_sightings_during`] 先依 `MAX(ts)` 取最近 `limit` 個值；主題若在
+    /// 選完之後才濾，較舊的對題出處會被較新的無關值擠掉，同號碼的其他主題
+    /// 也會蓋掉真正出處。這裡把主題條件放進挑值之前。
+    pub(crate) fn fact_sightings_matching(
+        &self,
+        kind: &str,
+        limit: usize,
+        range: Option<&crate::question::TimeRange>,
+        topic: &str,
+    ) -> Result<Vec<(FactRow, i64)>> {
+        use rusqlite::types::Value;
+        let terms: Vec<&str> = topic.split_whitespace().collect();
+        if terms.is_empty() {
+            return self.fact_sightings_during(kind, limit, range);
+        }
+        let mut values = vec![
+            Value::Text(kind.to_owned()),
+            Value::Integer(Self::SAME_SITTING_MS),
+            Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)),
+            range.map_or(Value::Null, |r| Value::Integer(r.from)),
+            range.map_or(Value::Null, |r| Value::Integer(r.to)),
+        ];
+        let mut predicates = String::new();
+        for term in terms {
+            values.push(Value::Text(term.to_owned()));
+            predicates.push_str(&format!(
+                " AND instr(lower(coalesce(f.raw, '') || ' ' || coalesce(f.normalized, '') || ' ' ||
+                    coalesce(f.app_id, '') || ' ' || coalesce(f.window_title, '') || ' ' ||
+                    coalesce(f.url, '') || ' ' || coalesce(c.text, '')), lower(?{})) > 0",
+                values.len()
+            ));
+        }
+        let sql = format!(
+            "WITH matched AS (
+                SELECT f.id, f.ts, f.kind, f.raw, f.normalized, f.source_kind,
+                       f.chunk_id, f.frame_id, f.app_id, f.window_title, f.url
+                FROM facts f LEFT JOIN text_chunks c ON c.id = f.chunk_id
+                WHERE f.kind = ?1
+                  AND (?4 IS NULL OR f.ts >= ?4) AND (?5 IS NULL OR f.ts < ?5)
+                  {predicates}
+             ), answered AS (
+                SELECT normalized AS value, MAX(ts) AS last_ts FROM matched
+                GROUP BY normalized
+                ORDER BY last_ts DESC, value ASC LIMIT ?3
+             )
+             SELECT id, ts, kind, raw, normalized, source_kind,
+                    chunk_id, frame_id, app_id, window_title, url,
+                    SUM(opens_a_sitting), MAX(ts)
+             FROM (
+                SELECT f.id, f.ts, f.kind, f.raw, f.normalized, f.source_kind,
+                       f.chunk_id, f.frame_id, f.app_id, f.window_title, f.url,
+                       CASE WHEN LAG(f.ts) OVER seen IS NULL
+                              OR f.ts - LAG(f.ts) OVER seen >= ?2
+                            THEN 1 ELSE 0 END AS opens_a_sitting
+                FROM matched f JOIN answered ON f.normalized = answered.value
+                WINDOW seen AS (PARTITION BY f.normalized ORDER BY f.ts, f.id)
+             )
+             GROUP BY normalized
+             ORDER BY ts DESC, normalized ASC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(values), |row| {
+            Ok((map_fact_row(row)?, row.get::<_, i64>(11)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     /// 依 typed fact 直查（`sister facts --kind` 走這條）。
@@ -9800,8 +9882,8 @@ mod tests {
         assert_eq!(report.events, 5);
         assert_eq!(report.frames, 1);
         assert_eq!(
-            report.facts, 5,
-            "frame、focus title、clipboard 的 L1 都要算進回報：{report:?}"
+            report.facts, 6,
+            "frame、focus title、clipboard、位址列網址的 L1 都要算進回報：{report:?}"
         );
         assert_eq!(
             imported.schema_version().expect("schema after import"),
@@ -9842,6 +9924,16 @@ mod tests {
         ] {
             assert!(errors.contains(expected), "missing {expected}: {errors:?}");
         }
+        let urls: std::collections::BTreeSet<_> = imported
+            .facts_by_kind("url", 10)
+            .expect("rebuilt url facts")
+            .into_iter()
+            .map(|fact| fact.normalized)
+            .collect();
+        assert!(
+            urls.contains("https://example.test/build"),
+            "address-bar URL must rebuild as an L1 url fact: {urls:?}"
+        );
         assert!(
             !imported
                 .search("ERR_CLIPBOARD_REPLAY", 10)

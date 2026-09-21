@@ -51,12 +51,19 @@ pub fn answers_during(
     // 看了一次沒關掉。見 `Db::SAME_SITTING_MS`。
     //
     // 多要一筆，這樣「剛好 limit 筆」和「被切掉了」分得開。
+    let topic = crate::facts::topic_constraint(query);
     let mut merged: HashMap<String, Answer> = HashMap::new();
     for kind in crate::facts::kinds_for_query(query) {
         // 一句問話可以命中兩種 kind（「多少錢」→ money 和 percent），而同一
         // 個正規化字串理論上不會跨 kind 重複。真的重複的話取比較新的那一筆，
         // 次數相加——這比讓其中一邊安靜地覆蓋掉另一邊誠實。
-        for (row, sightings) in db.fact_sightings_during(kind.as_str(), limit + 1, range)? {
+        let rows = match topic.as_deref() {
+            Some(topic) => {
+                db.fact_sightings_matching(kind.as_str(), limit.saturating_add(1), range, topic)?
+            }
+            None => db.fact_sightings_during(kind.as_str(), limit.saturating_add(1), range)?,
+        };
+        for (row, sightings) in rows {
             match merged.get_mut(&row.normalized) {
                 Some(a) => {
                     a.sightings += sightings as usize;

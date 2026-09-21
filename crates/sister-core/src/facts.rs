@@ -140,27 +140,32 @@ pub fn extract(text: &str) -> Vec<ExtractedFact> {
         return Vec::new();
     }
 
+    // 規則跑在半形摺疊後的副本上：Windows OCR 常把帳單數字讀成全形。
+    // `raw` 與 byte span 必須指回原文，不能把摺疊結果當成螢幕上的字。
+    let (folded, orig_at) = fold_fullwidth_for_extract(text);
+    let source = folded.as_str();
+
     let mut cands: Vec<Cand> = Vec::new();
-    urls(text, &mut cands);
-    emails(text, &mut cands);
-    file_paths(text, &mut cands);
-    error_codes(text, &mut cands);
-    datetimes(text, &mut cands);
-    money(text, &mut cands);
-    phones(text, &mut cands);
-    ids(text, &mut cands);
+    urls(source, &mut cands);
+    emails(source, &mut cands);
+    file_paths(source, &mut cands);
+    error_codes(source, &mut cands);
+    datetimes(source, &mut cands);
+    money(source, &mut cands);
+    phones(source, &mut cands);
+    ids(source, &mut cands);
 
     // 先把跨度上的空白修掉。可選群組不存在時，它前面的 `\s*` 會把空白吃進
     // 比對範圍，害得邊界檢查誤以為隔壁的字緊貼著（`$20 per` 就是這樣被丟掉的）。
     for c in &mut cands {
-        let s = &text[c.start..c.end];
+        let s = &source[c.start..c.end];
         c.start += s.len() - s.trim_start().len();
         c.end -= s.len() - s.trim_end().len();
     }
     cands.retain(|c| c.end > c.start);
 
     // 邊界檢查：不能長在一串英數字的中間（避免從流水號裡切出假電話）
-    cands.retain(|c| ascii_word_boundary(text, c.start, c.end));
+    cands.retain(|c| ascii_word_boundary(source, c.start, c.end));
 
     // 優先級 → 長者勝 → 位置在前者勝
     cands.sort_by(|a, b| {
@@ -178,12 +183,14 @@ pub fn extract(text: &str) -> Vec<ExtractedFact> {
             continue;
         }
         taken.push((c.start, c.end));
+        let byte_start = orig_at[c.start];
+        let byte_end = orig_at[c.end];
         out.push(ExtractedFact {
             kind: c.kind,
-            raw: text[c.start..c.end].to_string(),
+            raw: text[byte_start..byte_end].to_string(),
             normalized: c.normalized,
-            byte_start: c.start,
-            byte_end: c.end,
+            byte_start,
+            byte_end,
         });
     }
 
@@ -198,83 +205,245 @@ pub fn extract(text: &str) -> Vec<ExtractedFact> {
 /// 這張表就是把「使用者的說法」接到「事實的型別」的那條線。
 ///
 /// 純查表、零模型。詞彙不足時寧可回空集合，不猜。
-pub fn kinds_for_query(query: &str) -> Vec<FactKind> {
-    const TABLE: &[(&str, FactKind)] = &[
-        ("電話", FactKind::Phone),
-        ("手機", FactKind::Phone),
-        ("專線", FactKind::Phone),
-        ("號碼", FactKind::Phone),
-        // 底下這幾條是拿真的問題去問她問出來的，不是坐在這裡想出來的：
-        // 「門號」和「我要繳多少」原本各是零筆答案，而那兩個東西就在螢幕上
-        // （「門號 0912-345-678」「本期應繳金額 NT$13,450」）。
-        ("門號", FactKind::Phone), // 台灣講手機就是講這兩個字，帳單上也印這個
-        ("分機", FactKind::Phone),
-        ("phone", FactKind::Phone),
-        ("telephone", FactKind::Phone),
-        ("tel", FactKind::Phone),
-        ("金額", FactKind::Money),
-        ("價格", FactKind::Money),
-        ("價錢", FactKind::Money),
-        ("多少錢", FactKind::Money),
-        // 「多少」自己太泛（多少人、多少次），配上動詞才問得出錢。
-        ("繳多少", FactKind::Money),
-        ("付多少", FactKind::Money),
-        ("欠多少", FactKind::Money),
-        ("費用", FactKind::Money),
-        ("帳單", FactKind::Money),
-        ("繳費", FactKind::Money),
-        ("money", FactKind::Money),
-        ("price", FactKind::Money),
-        ("cost", FactKind::Money),
-        ("網址", FactKind::Url),
-        ("連結", FactKind::Url),
-        ("url", FactKind::Url),
-        ("link", FactKind::Url),
-        ("信箱", FactKind::Email),
-        ("郵件", FactKind::Email),
-        ("email", FactKind::Email),
-        ("mail", FactKind::Email),
-        ("檔案", FactKind::FilePath),
-        ("路徑", FactKind::FilePath),
-        ("file", FactKind::FilePath),
-        ("path", FactKind::FilePath),
-        ("錯誤", FactKind::ErrorCode),
-        ("例外", FactKind::ErrorCode),
-        ("error", FactKind::ErrorCode),
-        ("exception", FactKind::ErrorCode),
-        ("編號", FactKind::IdLike),
-        ("單號", FactKind::IdLike),
-        ("序號", FactKind::IdLike),
-        ("日期", FactKind::DateTimeMention),
-        ("時間", FactKind::DateTimeMention),
-        ("期限", FactKind::DateTimeMention),
-        // 「幾號」刻意不收：「今天幾號」問日期，「電話幾號」問號碼，分不出來就不猜
-        ("什麼時候", FactKind::DateTimeMention),
-        ("date", FactKind::DateTimeMention),
-        ("when", FactKind::DateTimeMention),
-        ("deadline", FactKind::DateTimeMention),
-    ];
+const QUERY_KIND_TABLE: &[(&str, FactKind)] = &[
+    ("電話", FactKind::Phone),
+    ("手機", FactKind::Phone),
+    ("專線", FactKind::Phone),
+    ("號碼", FactKind::Phone),
+    // 底下這幾條是拿真的問題去問她問出來的，不是坐在這裡想出來的：
+    // 「門號」和「我要繳多少」原本各是零筆答案，而那兩個東西就在螢幕上
+    // （「門號 0912-345-678」「本期應繳金額 NT$13,450」）。
+    ("門號", FactKind::Phone), // 台灣講手機就是講這兩個字，帳單上也印這個
+    ("分機", FactKind::Phone),
+    ("phone", FactKind::Phone),
+    ("telephone", FactKind::Phone),
+    ("tel", FactKind::Phone),
+    ("金額", FactKind::Money),
+    ("價格", FactKind::Money),
+    ("價錢", FactKind::Money),
+    ("多少錢", FactKind::Money),
+    // 「多少」自己太泛（多少人、多少次），配上動詞才問得出錢。
+    ("繳多少", FactKind::Money),
+    ("付多少", FactKind::Money),
+    ("欠多少", FactKind::Money),
+    ("應繳", FactKind::Money),
+    ("費用", FactKind::Money),
+    ("帳單", FactKind::Money),
+    ("繳費", FactKind::Money),
+    ("money", FactKind::Money),
+    ("price", FactKind::Money),
+    ("cost", FactKind::Money),
+    ("網址", FactKind::Url),
+    ("連結", FactKind::Url),
+    ("網站", FactKind::Url),
+    ("官網", FactKind::Url),
+    ("url", FactKind::Url),
+    ("link", FactKind::Url),
+    ("信箱", FactKind::Email),
+    ("郵件", FactKind::Email),
+    ("email", FactKind::Email),
+    ("mail", FactKind::Email),
+    ("檔案", FactKind::FilePath),
+    ("路徑", FactKind::FilePath),
+    ("file", FactKind::FilePath),
+    ("path", FactKind::FilePath),
+    ("錯誤", FactKind::ErrorCode),
+    ("例外", FactKind::ErrorCode),
+    ("error", FactKind::ErrorCode),
+    ("exception", FactKind::ErrorCode),
+    ("編號", FactKind::IdLike),
+    ("單號", FactKind::IdLike),
+    ("序號", FactKind::IdLike),
+    ("日期", FactKind::DateTimeMention),
+    ("時間", FactKind::DateTimeMention),
+    ("期限", FactKind::DateTimeMention),
+    // 「幾號」刻意不收：「今天幾號」問日期，「電話幾號」問號碼，分不出來就不猜
+    ("什麼時候", FactKind::DateTimeMention),
+    ("date", FactKind::DateTimeMention),
+    ("when", FactKind::DateTimeMention),
+    ("deadline", FactKind::DateTimeMention),
+];
 
+fn query_kind_word_hits(q: &str, word: &str) -> bool {
+    // 英文必須是獨立詞（可接複數 s），不能把 hotel 的 tel、profile 的
+    // file 或識別字 error_code 當成類型要求。中文沒有空白，仍允許連寫；
+    // 共用的 ASCII 邊界也保留「phone是多少」這種中英相接的問法。
+    q.match_indices(word).any(|(start, _)| {
+        let end = start + word.len();
+        !word.is_ascii()
+            || ascii_word_boundary(q, start, end)
+            || (q[end..].starts_with('s') && ascii_word_boundary(q, start, end + 1))
+    })
+}
+
+pub fn kinds_for_query(query: &str) -> Vec<FactKind> {
     let q = query.to_lowercase();
     let mut out: Vec<FactKind> = Vec::new();
-    for (word, kind) in TABLE {
-        // 英文必須是獨立詞（可接複數 s），不能把 hotel 的 tel、profile 的
-        // file 或識別字 error_code 當成類型要求。中文沒有空白，仍允許連寫；
-        // 共用的 ASCII 邊界也保留「phone是多少」這種中英相接的問法。
-        let matches = q.match_indices(word).any(|(start, _)| {
-            let end = start + word.len();
-            !word.is_ascii()
-                || ascii_word_boundary(&q, start, end)
-                || (q[end..].starts_with('s') && ascii_word_boundary(&q, start, end + 1))
-        });
-        if matches && !out.contains(kind) {
+    for (word, kind) in QUERY_KIND_TABLE {
+        if query_kind_word_hits(&q, word) && !out.contains(kind) {
             out.push(*kind);
         }
     }
     out
 }
 
+/// 類型詞以外還剩下的主題。有的話，L1 答案必須出現在這段主題的出處附近，
+/// 不能把「火星會議連結」答成記憶裡任意一個網址。
+///
+/// 問句虛字不是主題：「電話是多少」「請幫我找昨天電話」與
+/// `what was the phone number yesterday` 都只問類型，不另限來源。
+pub fn topic_constraint(query: &str) -> Option<String> {
+    let lower = query.to_lowercase();
+    let mut rest = strip_fact_question_edges(&lower).to_owned();
+    rest = crate::question::terms(&rest).to_owned();
+    rest = strip_kind_words(&rest);
+    let leftover = strip_fact_question_edges(&rest)
+        .split_whitespace()
+        .filter(|tok| tok.chars().count() >= 2)
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!leftover.is_empty()).then_some(leftover)
+}
+
+fn strip_kind_words(rest: &str) -> String {
+    let mut keys: Vec<&str> = QUERY_KIND_TABLE.iter().map(|(word, _)| *word).collect();
+    keys.sort_by_key(|word| std::cmp::Reverse(word.len()));
+    let mut rest = rest.to_owned();
+    for key in keys {
+        let mut next = String::new();
+        let mut i = 0;
+        while i < rest.len() {
+            if rest[i..].starts_with(key) {
+                let end = i + key.len();
+                let taken = if key.is_ascii() && rest[end..].starts_with('s') {
+                    end + 1
+                } else {
+                    end
+                };
+                if !key.is_ascii() || ascii_word_boundary(&rest, i, taken) {
+                    next.push(' ');
+                    i = taken;
+                    continue;
+                }
+            }
+            let ch = rest[i..].chars().next().expect("rest not empty");
+            next.push(ch);
+            i += ch.len_utf8();
+        }
+        rest = next;
+    }
+    rest
+}
+
+// 只剝頭尾完整問句用語，不把中間的「我家」「是否」等名稱切碎。
+// 單字虛字交給 [`crate::question::terms`]，避免「是否」被「是」從開頭切掉。
+fn strip_fact_question_edges(mut text: &str) -> &str {
+    const CJK: &[&str] = &[
+        "請幫我找",
+        "請幫我查",
+        "幫我找",
+        "幫我查",
+        "我想知道",
+        "告訴我",
+        "請問",
+        "我要",
+        "是多少",
+        "是什麼",
+        "有多少",
+        "多少",
+        "幾號",
+        "在哪裡",
+        "在哪",
+        "昨天",
+        "今天",
+        "前天",
+        "剛剛",
+        "剛才",
+        "那個",
+        "這個",
+    ];
+    const ASCII: &[&str] = &[
+        "yesterday",
+        "numbers",
+        "number",
+        "please",
+        "codes",
+        "today",
+        "what",
+        "were",
+        "code",
+        "find",
+        "show",
+        "tell",
+        "was",
+        "are",
+        "the",
+        "and",
+        "an",
+        "is",
+        "my",
+        "me",
+        "a",
+    ];
+    loop {
+        text = text.trim_matches(|c: char| {
+            c.is_whitespace() || matches!(c, '?' | '？' | '。' | '!' | '！' | ',')
+        });
+        let old = text;
+        if let Some(tail) = CJK.iter().find_map(|word| text.strip_prefix(word)) {
+            text = tail;
+        } else if let Some(head) = CJK.iter().find_map(|word| text.strip_suffix(word)) {
+            text = head;
+        } else if let Some(tail) = ASCII.iter().find_map(|word| {
+            text.strip_prefix(word)
+                .filter(|_| ascii_word_boundary(text, 0, word.len()))
+        }) {
+            text = tail;
+        } else if let Some(head) = ASCII.iter().find_map(|word| {
+            text.strip_suffix(word)
+                .filter(|_| ascii_word_boundary(text, text.len() - word.len(), text.len()))
+        }) {
+            text = head;
+        }
+        if text == old {
+            return text;
+        }
+    }
+}
+
 // ---------- 共用工具 ----------
+
+/// 全形 ASCII 與常見 OCR 連字號摺成半形。
+///
+/// Windows OCR 常把帳單上的 `0912-345-678`、`NT$13,450` 讀成
+/// `０９１２－３４５－６７８`、`ＮＴ＄１３，４５０`。規則仍只認半形；
+/// 摺疊只為了比對，原文 span 另外對回去。
+fn fold_fullwidth_char(c: char) -> char {
+    match c {
+        '\u{3000}' => ' ',
+        '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+        '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
+        | '\u{2212}' | '\u{FE58}' | '\u{FE63}' => '-',
+        _ => c,
+    }
+}
+
+/// 摺疊後的 UTF-8，以及每個摺疊 byte 對應的原文起點。
+///
+/// `orig_at.len() == folded.len() + 1`；最後一格是原文結尾，給 exclusive end 用。
+fn fold_fullwidth_for_extract(text: &str) -> (String, Vec<usize>) {
+    let mut folded = String::with_capacity(text.len());
+    let mut orig_at = Vec::with_capacity(text.len() + 1);
+    for (byte_idx, ch) in text.char_indices() {
+        let mapped = fold_fullwidth_char(ch);
+        for _ in 0..mapped.len_utf8() {
+            orig_at.push(byte_idx);
+        }
+        folded.push(mapped);
+    }
+    orig_at.push(text.len());
+    (folded, orig_at)
+}
 
 /// 兩端不得緊鄰 ASCII 英數字或底線。
 ///
@@ -1134,11 +1303,33 @@ mod tests {
         // 拿真的問題去問她之後補的兩條。之前各是零筆答案，而東西就在螢幕上。
         assert_eq!(kinds_for_query("門號"), vec![FactKind::Phone]);
         assert_eq!(kinds_for_query("我要繳多少"), vec![FactKind::Money]);
+        assert_eq!(kinds_for_query("昨天應繳"), vec![FactKind::Money]);
+        assert_eq!(kinds_for_query("昨天那個網站"), vec![FactKind::Url]);
+        assert_eq!(kinds_for_query("官網網址"), vec![FactKind::Url]);
         // 「多少」自己不算——問「多少人」不是在問錢
         assert!(kinds_for_query("那場會議來了多少人").is_empty());
         // 認不出來就回空的，不猜
         assert!(kinds_for_query("我昨天在幹嘛").is_empty());
         assert!(kinds_for_query("").is_empty());
+    }
+
+    #[test]
+    fn topic_constraint_keeps_named_sources_and_drops_question_filler() {
+        assert_eq!(topic_constraint("昨天電話"), None);
+        assert_eq!(topic_constraint("昨天那個網站"), None);
+        assert_eq!(topic_constraint("電話是多少"), None);
+        assert_eq!(topic_constraint("請幫我找昨天電話"), None);
+        assert_eq!(topic_constraint("我要繳多少"), None);
+        assert_eq!(
+            topic_constraint("what was the phone number yesterday"),
+            None
+        );
+        assert_eq!(
+            topic_constraint("火星會議連結").as_deref(),
+            Some("火星會議")
+        );
+        assert_eq!(topic_constraint("客服電話").as_deref(), Some("客服"));
+        assert_eq!(topic_constraint("是否電話"), None);
     }
 
     #[test]
@@ -1272,6 +1463,31 @@ mod tests {
         assert!(has("市話 02-2345-6789", FactKind::Phone, "+886223456789"));
         assert!(has("市話 (02) 2345-6789", FactKind::Phone, "+886223456789"));
         assert!(has("台中 04-1234-5678", FactKind::Phone, "+886412345678"));
+    }
+
+    #[test]
+    fn fullwidth_ocr_digits_still_extract_taiwan_phone_and_money() {
+        let bill = "門號 ０９１２－３４５－６７８\n本期應繳 ＮＴ＄１３，４５０";
+        let facts = extract(bill);
+        let phone = facts
+            .iter()
+            .find(|f| f.kind == FactKind::Phone)
+            .expect("fullwidth mobile");
+        assert_eq!(phone.normalized, "+886912345678");
+        assert_eq!(phone.raw, "０９１２－３４５－６７８");
+        assert_eq!(&bill[phone.byte_start..phone.byte_end], phone.raw);
+        let money = facts
+            .iter()
+            .find(|f| f.kind == FactKind::Money)
+            .expect("fullwidth amount");
+        assert_eq!(money.normalized, "TWD:13450");
+        assert_eq!(money.raw, "ＮＴ＄１３，４５０");
+        assert_eq!(&bill[money.byte_start..money.byte_end], money.raw);
+        assert!(has(
+            "客服專線 ０８００－０８０－１２３",
+            FactKind::Phone,
+            "+886800080123"
+        ));
     }
 
     #[test]
