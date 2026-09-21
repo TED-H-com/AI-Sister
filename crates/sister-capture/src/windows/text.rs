@@ -3,7 +3,8 @@
 //! focus changes, content cache or event/keystroke listener.
 use crate::assistive::{self, ReadWindow, TextEnd, TextRange, TextRect, TextRole, VisibleText};
 use crate::page_crop::{
-    Frontier, PAGE_WALK_DEPTH_CAP, PageCrop, PageNode, choose_page_crop, frontier, sibling_chain,
+    BreadthWalk, Frontier, PAGE_WALK_DEPTH_CAP, PageCrop, PageNode, choose_page_crop, frontier,
+    sibling_chain,
 };
 use sister_core::model::AssistiveBlock;
 use windows::{
@@ -140,14 +141,21 @@ impl FocusedText<'_> {
     }
 }
 impl FocusedText<'_> {
-    /// The Document range to clip to, when the walk finished and exactly one
-    /// Group qualified as the on-screen page.
+    /// The Document range to clip to when one Group is the on-screen page.
     ///
-    /// Every direct child is seeded, the same way each visited node's children
-    /// are. The focused Document itself is not a candidate. Stopping on the
-    /// node budget, or on a child past the depth cap, does not clip: those
-    /// counts are unfinished. Zero qualified pages is a different decision
-    /// from an unfinished count, and neither one clips.
+    /// Direct children of the focused Document are queued at depth 1 and
+    /// visited breadth-first, before any node they contain. The Document
+    /// itself is not a candidate. `nodes` and `elements` are appended
+    /// together; the crop index is into that pair. A node the budget refuses
+    /// is appended to neither.
+    ///
+    /// A finished walk clips when exactly one observed node qualifies. An
+    /// unfinished walk also clips when every direct child was observed and
+    /// exactly one of those depth-1 nodes qualifies. A direct child the node
+    /// cap did not observe leaves that layer incomplete, and then an
+    /// unfinished walk does not clip. A child past the depth cap leaves the
+    /// walk unfinished without erasing a depth-1 layer already observed.
+    /// Zero qualified pages is not an unfinished count, and it does not clip.
     ///
     /// Group, offscreen, monitor overlap, and the thumbnail/sidebar size floor
     /// are decided in `crate::page_crop`. The floor is not the page's real size.
@@ -157,48 +165,47 @@ impl FocusedText<'_> {
     ) -> Option<IUIAutomationTextRange> {
         let walker = unsafe { self.automation.ControlViewWalker() }.ok()?;
         let monitor = super::screen::focused_monitor(self.hwnd).map(|(_, bounds)| rect(bounds));
-        let mut pending = Vec::new();
-        for child in sibling_chain(
+        let mut walk = BreadthWalk::seed(sibling_chain(
             unsafe { walker.GetFirstChildElement(&self.element) }.ok(),
             |child| unsafe { walker.GetNextSiblingElement(child) }.ok(),
-        ) {
-            pending.push((child, 1u32));
-        }
-        let mut visited = 0u32;
-        let mut walk_finished = true;
+        ));
         let mut nodes = Vec::new();
         let mut elements = Vec::new();
-        while walk_finished && let Some((current, depth)) = pending.pop() {
-            let child_at_cap = if depth >= PAGE_WALK_DEPTH_CAP {
+        while let Some((current, depth)) = walk.pop_front() {
+            let child_at_cap = if depth.get() >= PAGE_WALK_DEPTH_CAP {
                 Some(unsafe { walker.GetFirstChildElement(&current) }.is_ok())
             } else {
                 None
             };
-            match frontier(visited, depth, child_at_cap) {
-                Frontier::BudgetLeftNodes => walk_finished = false,
+            match frontier(walk.visited(), depth.get(), child_at_cap) {
+                Frontier::BudgetLeftNodes => walk.stop_for_node_cap(depth),
                 Frontier::DepthLeftChildren => {
                     // Count this node, then stop. Its children are past the cap.
-                    visited += 1;
-                    nodes.push(observe_page(&current));
+                    let stored = walk.record_observed(depth);
+                    nodes.push(observe_page(&current, stored));
                     elements.push(current);
-                    walk_finished = false;
+                    walk.stop_for_depth_cap();
                 }
                 Frontier::Open { descend } => {
-                    visited += 1;
-                    nodes.push(observe_page(&current));
+                    let stored = walk.record_observed(depth);
+                    nodes.push(observe_page(&current, stored));
+                    // `depth` is the popped node. Children are one level under it.
                     if descend {
-                        for child in sibling_chain(
-                            unsafe { walker.GetFirstChildElement(&current) }.ok(),
-                            |child| unsafe { walker.GetNextSiblingElement(child) }.ok(),
-                        ) {
-                            pending.push((child, depth + 1));
-                        }
+                        walk.enqueue_children(
+                            depth,
+                            sibling_chain(
+                                unsafe { walker.GetFirstChildElement(&current) }.ok(),
+                                |child| unsafe { walker.GetNextSiblingElement(child) }.ok(),
+                            ),
+                        );
                     }
                     elements.push(current);
                 }
             }
         }
-        match choose_page_crop(&nodes, monitor, walk_finished) {
+        debug_assert_eq!(nodes.len(), elements.len());
+        let outcome = walk.outcome();
+        match choose_page_crop(&nodes, monitor, outcome.walk_finished, outcome.depth_one) {
             PageCrop::Crop(index) => {
                 let element = elements.get(index)?;
                 unsafe { pattern.RangeFromChild(element) }.ok()
@@ -208,7 +215,7 @@ impl FocusedText<'_> {
     }
 }
 
-fn observe_page(element: &IUIAutomationElement) -> PageNode {
+fn observe_page(element: &IUIAutomationElement, depth: u32) -> PageNode {
     PageNode {
         is_group: unsafe { element.CurrentControlType() }
             .ok()
@@ -217,6 +224,7 @@ fn observe_page(element: &IUIAutomationElement) -> PageNode {
             .ok()
             .map(|value| value.as_bool()),
         bounds: unsafe { element.CurrentBoundingRectangle() }.ok().map(rect),
+        depth,
     }
 }
 fn text_pattern(element: &IUIAutomationElement) -> Option<IUIAutomationTextPattern> {
@@ -257,9 +265,8 @@ impl FocusedText<'_> {
         if let Some(pattern) = text_pattern(&self.element) {
             // Edge PDF often keeps keyboard focus on the TextPattern Document.
             // GetVisibleRanges then flattens offscreen pages into the same
-            // range. Clip only when the walk finished and exactly one Group
-            // is the on-screen page. An unfinished walk, no qualified page,
-            // or more than one page leaves the document ranges alone.
+            // range. Clip when one on-screen page Group was singled out.
+            // An unresolved walk leaves the document ranges alone.
             if self.role()? == TextRole::Document
                 && let Some(scope) = self.onscreen_page_scope(&pattern)
             {
