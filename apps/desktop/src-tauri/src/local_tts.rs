@@ -10,8 +10,8 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use sister_core::config::{LocalTtsEnabled, PersonaId};
 use sister_tts::{
-    HEALTH_ENDPOINT, LOCAL_TTS_AUDIO_CONTENT_TYPE, LOCAL_TTS_MAX_AUDIO_BYTES, LocalPersona,
-    LocalServiceStatus, LoopbackClient, TTS_ENDPOINT,
+    HEALTH_ENDPOINT, HealthProbeSlot, LOCAL_TTS_AUDIO_CONTENT_TYPE, LOCAL_TTS_MAX_AUDIO_BYTES,
+    LocalPersona, LocalServiceStatus, LoopbackClient, ProbeTaskError, TTS_ENDPOINT, classify_probe,
 };
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -27,7 +27,7 @@ pub struct Runtime {
     pub admission: Arc<Mutex<()>>,
     pub transition: Arc<Mutex<()>>,
     pub session: Arc<Mutex<Option<Arc<LoopbackClient>>>>,
-    pub health_session: Arc<Mutex<Option<Arc<LoopbackClient>>>>,
+    pub health_slot: HealthProbeSlot,
 }
 
 impl Runtime {
@@ -39,7 +39,7 @@ impl Runtime {
             admission: Arc::new(Mutex::new(())),
             transition: Arc::new(Mutex::new(())),
             session: Arc::new(Mutex::new(None)),
-            health_session: Arc::new(Mutex::new(None)),
+            health_slot: HealthProbeSlot::new(),
         }
     }
 }
@@ -49,6 +49,7 @@ pub struct LocalTtsView {
     generation: u64,
     config_readable: bool,
     enabled: Option<bool>,
+    voice_enabled: Option<bool>,
     endpoint: Option<&'static str>,
     health_endpoint: Option<&'static str>,
     service: &'static str,
@@ -133,6 +134,7 @@ fn view_with_service(shell: &Shell, service: LocalServiceStatus) -> LocalTtsView
                 generation,
                 config_readable: true,
                 enabled: Some(enabled),
+                voice_enabled: Some(config.shell.persona.voice_enabled().get()),
                 endpoint: Some(TTS_ENDPOINT),
                 health_endpoint: Some(HEALTH_ENDPOINT),
                 service: service.as_str(),
@@ -145,6 +147,7 @@ fn view_with_service(shell: &Shell, service: LocalServiceStatus) -> LocalTtsView
             generation,
             config_readable: false,
             enabled: None,
+            voice_enabled: None,
             endpoint: None,
             health_endpoint: None,
             service: LocalServiceStatus::Missing.as_str(),
@@ -161,11 +164,7 @@ fn cancel_clients(shell: &Shell) {
     {
         client.cancel();
     }
-    if let Ok(mut slot) = shell.local_tts.health_session.lock()
-        && let Some(client) = slot.take()
-    {
-        client.cancel();
-    }
+    shell.local_tts.health_slot.cancel_current();
 }
 
 fn stop_intent(app: &tauri::AppHandle, shell: &Shell) {
@@ -186,19 +185,23 @@ pub(crate) fn invalidate(app: &tauri::AppHandle, shell: &Shell) {
     stop_intent(app, shell);
 }
 
+fn probe_task_error(error: &tauri::Error) -> ProbeTaskError {
+    match error {
+        tauri::Error::JoinError(join) if join.is_cancelled() => ProbeTaskError::Cancelled,
+        _ => ProbeTaskError::Failed,
+    }
+}
+
 async fn probe_health_off_thread(shell: &Shell) -> LocalServiceStatus {
-    let client = Arc::new(LoopbackClient::new());
-    if let Ok(mut slot) = shell.local_tts.health_session.lock() {
-        *slot = Some(Arc::clone(&client));
-    }
-    let probed = tauri::async_runtime::spawn_blocking(move || client.probe_health())
-        .await
-        .unwrap_or(Ok(LocalServiceStatus::Protocol))
-        .unwrap_or(LocalServiceStatus::Protocol);
-    if let Ok(mut slot) = shell.local_tts.health_session.lock() {
-        *slot = None;
-    }
-    probed
+    let client = shell.local_tts.health_slot.begin();
+    let worker = Arc::clone(&client);
+    let joined = tauri::async_runtime::spawn_blocking(move || worker.probe_health()).await;
+    let status = classify_probe(match joined {
+        Ok(result) => Ok(result),
+        Err(error) => Err(probe_task_error(&error)),
+    });
+    shell.local_tts.health_slot.finish(&client);
+    status
 }
 
 #[tauri::command]

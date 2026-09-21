@@ -1,7 +1,9 @@
 //! AI-Sister 的文字轉語音邊界。
 //!
 //! 預設 feature 只包含 typed authority、SSML 編碼與 response 驗證，不含 HTTP
-//! client。只有明確啟用 `azure` feature 才會編入 `ureq`。這個 crate 不保存
+//! client，也不含 loopback socket。只有明確啟用 `azure` feature 才會編入 `ureq`；
+//! 只有明確啟用 `local` feature 才會編入 `127.0.0.1:8231`（這個 crate 自己的測試
+//! 建置同樣編入，否則 `cargo test --workspace` 碰不到那一層）。這個 crate 不保存
 //! credential、不接受任意 endpoint，也不在錯誤或 `Debug` 輸出裡帶出 key／文字。
 //! Consent authority 留在 desktop／sister-core 邊界；desktop 的唯一呼叫 helper 必須
 //! by-value 消耗持有 shared consent lock 的 `AzureTtsAdmissionGuard`，本 crate 不自行
@@ -12,6 +14,7 @@ use std::fmt;
 use std::io::Read;
 use std::time::Duration;
 
+#[cfg(any(feature = "local", test))]
 mod local;
 
 #[cfg(feature = "azure")]
@@ -20,14 +23,17 @@ mod native;
 #[cfg(feature = "azure")]
 pub use native::AzureClient;
 
+#[cfg(any(feature = "local", test))]
 pub use local::{
-    HEALTH_ENDPOINT, HEALTH_PATH, LOCAL_HOST, LOCAL_PORT, LOCAL_TTS_AUDIO_CONTENT_TYPE,
-    LOCAL_TTS_MAX_AUDIO_BYTES, LOCAL_TTS_MAX_TEXT_BYTES, LOCAL_TTS_USER_AGENT, LocalAudio,
-    LocalError, LocalPersona, LocalRequest, LocalServiceStatus, LocalTransport,
-    LocalTransportFailure, LocalTransportResponse, TTS_ENDPOINT, TTS_PATH, health_with_transport,
-    speak_allowed, synthesize_local_with_transport, tts_request,
+    HEALTH_ENDPOINT, HEALTH_PATH, HealthProbeSlot, LOCAL_HOST, LOCAL_PORT,
+    LOCAL_TTS_AUDIO_CONTENT_TYPE, LOCAL_TTS_MAX_AUDIO_BYTES, LOCAL_TTS_MAX_TEXT_BYTES,
+    LOCAL_TTS_USER_AGENT, LocalAudio, LocalError, LocalPersona, LocalRequest, LocalServiceStatus,
+    LocalTransport, LocalTransportFailure, LocalTransportResponse, ProbeTaskError, TTS_ENDPOINT,
+    TTS_PATH, classify_probe, health_with_transport, speak_allowed,
+    synthesize_local_with_transport, tts_request,
 };
 
+#[cfg(any(feature = "local", test))]
 pub use local::LoopbackClient;
 
 pub const SSML_CONTENT_TYPE: &str = "application/ssml+xml";

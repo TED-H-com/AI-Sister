@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpStream};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const LOCAL_HOST: Ipv4Addr = Ipv4Addr::LOCALHOST;
@@ -149,7 +149,18 @@ pub enum LocalError {
     AudioTooLarge,
     InvalidWav,
     InvalidHealth,
+    /// 開關是關的。這不是服務還沒載入。
+    LocalTtsDisabled,
+    /// 連不上 127.0.0.1:8231。
+    ServiceMissing,
+    /// 服務有回答，但 `ok` 與 `ready` 不同時為真。
     ServiceNotReady,
+    /// 埠上有回應，但不是這份健康檢查認得的內容。
+    ServiceProtocol,
+    /// 這次探測被取消，還沒有健康結果。
+    ServiceCancelled,
+    /// 探測工作自己沒跑完，還沒有健康結果。
+    ServiceProbeFailed,
 }
 
 impl fmt::Display for LocalError {
@@ -178,7 +189,14 @@ impl fmt::Display for LocalError {
             Self::AudioTooLarge => formatter.write_str("本機台灣語音回應超過單次音訊上限"),
             Self::InvalidWav => formatter.write_str("本機台灣語音回應不是可播放的 WAV"),
             Self::InvalidHealth => formatter.write_str("本機台灣語音健康檢查回應無法辨識"),
+            Self::LocalTtsDisabled => formatter.write_str("本機台灣語音目前關閉"),
+            Self::ServiceMissing => formatter.write_str("沒有偵測到本機台灣語音服務"),
             Self::ServiceNotReady => formatter.write_str("本機台灣語音服務尚未載入完成"),
+            Self::ServiceProtocol => {
+                formatter.write_str("本機台灣語音服務的回應不是認得的健康檢查")
+            }
+            Self::ServiceCancelled => formatter.write_str("本機台灣語音健康檢查已停止"),
+            Self::ServiceProbeFailed => formatter.write_str("本機台灣語音健康檢查沒有完成"),
         }
     }
 }
@@ -351,6 +369,10 @@ pub enum LocalServiceStatus {
     NotReady,
     Ready,
     Protocol,
+    /// 探測被取消。不是「對方回了認不得的內容」。
+    Cancelled,
+    /// blocking 探測自己失敗，沒有健康結果。
+    Failed,
 }
 
 impl LocalServiceStatus {
@@ -360,6 +382,27 @@ impl LocalServiceStatus {
             Self::NotReady => "not_ready",
             Self::Ready => "ready",
             Self::Protocol => "protocol",
+            Self::Cancelled => "cancelled",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// 一次健康檢查實際解出來的欄位。連不上、取消、或內容認不出來時，`ok`／`ready`
+/// 是 `None`——沒量到，不是 `false`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ObservedLocalHealth {
+    status: LocalServiceStatus,
+    ok: Option<bool>,
+    ready: Option<bool>,
+}
+
+impl ObservedLocalHealth {
+    const fn bare(status: LocalServiceStatus) -> Self {
+        Self {
+            status,
+            ok: None,
+            ready: None,
         }
     }
 }
@@ -430,32 +473,64 @@ pub fn encode_http_request(request: &LocalRequest) -> Vec<u8> {
 
 pub fn speak_allowed(enabled: bool, service: LocalServiceStatus) -> LocalResult<()> {
     if !enabled {
-        return Err(LocalError::ServiceNotReady);
+        return Err(LocalError::LocalTtsDisabled);
     }
     match service {
         LocalServiceStatus::Ready => Ok(()),
-        LocalServiceStatus::Missing
-        | LocalServiceStatus::NotReady
-        | LocalServiceStatus::Protocol => Err(LocalError::ServiceNotReady),
+        LocalServiceStatus::Missing => Err(LocalError::ServiceMissing),
+        LocalServiceStatus::NotReady => Err(LocalError::ServiceNotReady),
+        LocalServiceStatus::Protocol => Err(LocalError::ServiceProtocol),
+        LocalServiceStatus::Cancelled => Err(LocalError::ServiceCancelled),
+        LocalServiceStatus::Failed => Err(LocalError::ServiceProbeFailed),
     }
 }
 
+/// 把一次探測的結果收成畫面用的狀態。取消（傳輸取消，或工作本身被取消）
+/// 不收成 `Protocol`。工作自己失敗也不是「對方回了認不得的內容」。
+pub fn classify_probe(
+    joined: Result<LocalResult<LocalServiceStatus>, ProbeTaskError>,
+) -> LocalServiceStatus {
+    match joined {
+        Ok(Ok(status)) => status,
+        Ok(Err(LocalError::Transport(LocalTransportFailure::Cancelled)))
+        | Err(ProbeTaskError::Cancelled) => LocalServiceStatus::Cancelled,
+        Err(ProbeTaskError::Failed) => LocalServiceStatus::Failed,
+        Ok(Err(_)) => LocalServiceStatus::Protocol,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeTaskError {
+    Cancelled,
+    Failed,
+}
+
 pub fn health_with_transport(transport: &dyn LocalTransport) -> LocalResult<LocalServiceStatus> {
+    observe_health(transport).map(|observed| observed.status)
+}
+
+fn observe_health(transport: &dyn LocalTransport) -> LocalResult<ObservedLocalHealth> {
     let request = health_request();
     let response = match transport.execute(&request) {
         Ok(response) => response,
         Err(LocalTransportFailure::Connection | LocalTransportFailure::Timeout) => {
-            return Ok(LocalServiceStatus::Missing);
+            return Ok(ObservedLocalHealth::bare(LocalServiceStatus::Missing));
+        }
+        Err(LocalTransportFailure::Cancelled) => {
+            return Ok(ObservedLocalHealth::bare(LocalServiceStatus::Cancelled));
         }
         Err(failure) => return Err(failure.into()),
     };
-    match decode_health(response) {
-        Ok(status) => Ok(status),
+    match decode_health_observed(response) {
+        Ok(observed) => Ok(observed),
         Err(LocalError::Transport(
             LocalTransportFailure::Connection | LocalTransportFailure::Timeout,
-        )) => Ok(LocalServiceStatus::Missing),
+        )) => Ok(ObservedLocalHealth::bare(LocalServiceStatus::Missing)),
+        Err(LocalError::Transport(LocalTransportFailure::Cancelled)) => {
+            Ok(ObservedLocalHealth::bare(LocalServiceStatus::Cancelled))
+        }
         Err(LocalError::InvalidHealth | LocalError::UnexpectedStatus(_)) => {
-            Ok(LocalServiceStatus::Protocol)
+            Ok(ObservedLocalHealth::bare(LocalServiceStatus::Protocol))
         }
         Err(error) => Err(error),
     }
@@ -479,7 +554,7 @@ fn media_type(value: &str) -> &str {
     value.split(';').next().map(str::trim).unwrap_or(value)
 }
 
-fn decode_health(response: LocalTransportResponse) -> LocalResult<LocalServiceStatus> {
+fn decode_health_observed(response: LocalTransportResponse) -> LocalResult<ObservedLocalHealth> {
     fail_closed_headers(&response, LOCAL_TTS_MAX_HEALTH_BYTES, true)?;
     if response.status != 200 {
         return Err(LocalError::UnexpectedStatus(response.status));
@@ -497,9 +572,17 @@ fn decode_health(response: LocalTransportResponse) -> LocalResult<LocalServiceSt
     let parsed: HealthBody =
         serde_json::from_slice(&response.body).map_err(|_| LocalError::InvalidHealth)?;
     if parsed.ok && parsed.ready {
-        Ok(LocalServiceStatus::Ready)
+        Ok(ObservedLocalHealth {
+            status: LocalServiceStatus::Ready,
+            ok: Some(true),
+            ready: Some(true),
+        })
     } else {
-        Ok(LocalServiceStatus::NotReady)
+        Ok(ObservedLocalHealth {
+            status: LocalServiceStatus::NotReady,
+            ok: Some(parsed.ok),
+            ready: Some(parsed.ready),
+        })
     }
 }
 
@@ -762,7 +845,11 @@ impl LoopbackClient {
     }
 
     pub fn probe_health(&self) -> LocalResult<LocalServiceStatus> {
-        health_with_transport(self)
+        Ok(self.probe_observed()?.status)
+    }
+
+    fn probe_observed(&self) -> LocalResult<ObservedLocalHealth> {
+        observe_health(self)
     }
 
     pub fn synthesize(&self, persona: LocalPersona, text: &str) -> LocalResult<LocalAudio> {
@@ -930,6 +1017,58 @@ impl LocalTransport for LoopbackClient {
         request: &LocalRequest,
     ) -> Result<LocalTransportResponse, LocalTransportFailure> {
         self.execute_loopback(SocketAddr::from((LOCAL_HOST, LOCAL_PORT)), request, true)
+    }
+}
+
+/// 健康探測的 slot。較舊的那次結束時，只在裡面仍是自己放進去的 client 才清掉。
+#[derive(Default)]
+pub struct HealthProbeSlot {
+    current: Mutex<Option<Arc<LoopbackClient>>>,
+}
+
+impl HealthProbeSlot {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn begin(&self) -> Arc<LoopbackClient> {
+        let client = Arc::new(LoopbackClient::new());
+        *self.lock() = Some(Arc::clone(&client));
+        client
+    }
+
+    pub fn finish(&self, client: &Arc<LoopbackClient>) {
+        let mut slot = self.lock();
+        if slot
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, client))
+        {
+            *slot = None;
+        }
+    }
+
+    pub fn cancel_current(&self) {
+        if let Some(client) = self.lock().take() {
+            client.cancel();
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Arc<LoopbackClient>>> {
+        self.current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[cfg(test)]
+    fn holds(&self, client: &Arc<LoopbackClient>) -> bool {
+        self.lock()
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, client))
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.lock().is_none()
     }
 }
 
@@ -1289,35 +1428,205 @@ mod tests {
     fn speak_allowed_is_ready_only_when_enabled_and_health_ready() {
         assert_eq!(
             speak_allowed(false, LocalServiceStatus::Ready),
-            Err(LocalError::ServiceNotReady)
+            Err(LocalError::LocalTtsDisabled)
         );
         assert_eq!(
             speak_allowed(true, LocalServiceStatus::Missing),
-            Err(LocalError::ServiceNotReady)
+            Err(LocalError::ServiceMissing)
         );
         assert_eq!(speak_allowed(true, LocalServiceStatus::Ready), Ok(()));
     }
 
     #[test]
-    fn live_health_probe_reports_the_actual_loopback_service() {
-        let status = LoopbackClient::new().probe_health().unwrap();
-        // This talks to whatever is actually bound on 127.0.0.1:8231. Missing is
-        // a real outcome, not a test failure; Ready is only true if the daemon
-        // answered ok+ready.
-        assert!(
-            matches!(
-                status,
-                LocalServiceStatus::Ready
-                    | LocalServiceStatus::NotReady
-                    | LocalServiceStatus::Missing
-                    | LocalServiceStatus::Protocol
-            ),
-            "{status:?}"
+    fn speak_allowed_when_switch_is_off_says_the_switch_is_off() {
+        let error = speak_allowed(false, LocalServiceStatus::Ready).unwrap_err();
+        assert_eq!(error, LocalError::LocalTtsDisabled);
+        assert_eq!(error.to_string(), "本機台灣語音目前關閉");
+    }
+
+    #[test]
+    fn speak_allowed_when_service_is_missing_says_it_was_not_detected() {
+        let error = speak_allowed(true, LocalServiceStatus::Missing).unwrap_err();
+        assert_eq!(error, LocalError::ServiceMissing);
+        assert_eq!(error.to_string(), "沒有偵測到本機台灣語音服務");
+    }
+
+    #[test]
+    fn speak_allowed_when_service_is_not_ready_says_loading_is_unfinished() {
+        let error = speak_allowed(true, LocalServiceStatus::NotReady).unwrap_err();
+        assert_eq!(error, LocalError::ServiceNotReady);
+        assert_eq!(error.to_string(), "本機台灣語音服務尚未載入完成");
+    }
+
+    #[test]
+    fn speak_allowed_when_protocol_is_unrecognized_says_so() {
+        let error = speak_allowed(true, LocalServiceStatus::Protocol).unwrap_err();
+        assert_eq!(error, LocalError::ServiceProtocol);
+        assert_eq!(
+            error.to_string(),
+            "本機台灣語音服務的回應不是認得的健康檢查"
+        );
+    }
+
+    #[test]
+    fn speak_allowed_when_probe_was_cancelled_or_failed_does_not_say_still_loading() {
+        let cancelled = speak_allowed(true, LocalServiceStatus::Cancelled).unwrap_err();
+        let failed = speak_allowed(true, LocalServiceStatus::Failed).unwrap_err();
+        assert_eq!(cancelled.to_string(), "本機台灣語音健康檢查已停止");
+        assert_eq!(failed.to_string(), "本機台灣語音健康檢查沒有完成");
+        assert_ne!(
+            cancelled.to_string(),
+            speak_allowed(true, LocalServiceStatus::NotReady)
+                .unwrap_err()
+                .to_string()
+        );
+        assert_ne!(cancelled.to_string(), failed.to_string());
+    }
+
+    #[test]
+    fn cancelled_health_probe_is_not_classified_as_protocol() {
+        let fake = FakeTransport::failing(LocalTransportFailure::Cancelled);
+        assert_eq!(
+            health_with_transport(&fake).unwrap(),
+            LocalServiceStatus::Cancelled
         );
         assert_eq!(
-            status == LocalServiceStatus::Ready,
-            status.as_str() == "ready"
+            classify_probe(Ok(Err(LocalError::Transport(
+                LocalTransportFailure::Cancelled
+            )))),
+            LocalServiceStatus::Cancelled
         );
+        assert_eq!(
+            classify_probe(Err(ProbeTaskError::Cancelled)),
+            LocalServiceStatus::Cancelled
+        );
+        assert_eq!(
+            classify_probe(Err(ProbeTaskError::Failed)),
+            LocalServiceStatus::Failed
+        );
+        assert_eq!(
+            classify_probe(Ok(Err(LocalError::InvalidHealth))),
+            LocalServiceStatus::Protocol
+        );
+        assert_ne!(
+            classify_probe(Err(ProbeTaskError::Cancelled)),
+            LocalServiceStatus::Protocol
+        );
+        assert_ne!(
+            classify_probe(Err(ProbeTaskError::Failed)),
+            LocalServiceStatus::Protocol
+        );
+    }
+
+    #[test]
+    fn older_health_probe_finish_does_not_clear_the_newer_slot() {
+        let slot = HealthProbeSlot::new();
+        let older = slot.begin();
+        let newer = slot.begin();
+        assert!(slot.holds(&newer));
+        assert!(!slot.holds(&older));
+        slot.finish(&older);
+        assert!(
+            slot.holds(&newer),
+            "older probe finish cleared the newer client"
+        );
+        slot.cancel_current();
+        assert!(newer.cancelled(), "stop could not reach the newer probe");
+        assert!(!older.cancelled());
+        assert!(slot.is_empty());
+        let again = slot.begin();
+        slot.finish(&again);
+        assert!(slot.is_empty());
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum LiveHealthExpectation {
+        SkipNoDaemon,
+        AssertReady { ok: bool, ready: bool },
+        Reject(LocalServiceStatus),
+    }
+
+    fn expect_live_health(observed: &ObservedLocalHealth) -> LiveHealthExpectation {
+        match observed.status {
+            LocalServiceStatus::Missing => LiveHealthExpectation::SkipNoDaemon,
+            LocalServiceStatus::Ready => match (observed.ok, observed.ready) {
+                (Some(ok), Some(ready)) => LiveHealthExpectation::AssertReady { ok, ready },
+                _ => LiveHealthExpectation::Reject(LocalServiceStatus::Ready),
+            },
+            other => LiveHealthExpectation::Reject(other),
+        }
+    }
+
+    #[test]
+    fn live_health_acceptance_rejects_non_ready_answers() {
+        let missing = ObservedLocalHealth::bare(LocalServiceStatus::Missing);
+        assert_eq!(
+            expect_live_health(&missing),
+            LiveHealthExpectation::SkipNoDaemon
+        );
+        let ready = ObservedLocalHealth {
+            status: LocalServiceStatus::Ready,
+            ok: Some(true),
+            ready: Some(true),
+        };
+        assert_eq!(
+            expect_live_health(&ready),
+            LiveHealthExpectation::AssertReady {
+                ok: true,
+                ready: true
+            }
+        );
+        assert_eq!(
+            expect_live_health(&ObservedLocalHealth {
+                status: LocalServiceStatus::NotReady,
+                ok: Some(true),
+                ready: Some(false),
+            }),
+            LiveHealthExpectation::Reject(LocalServiceStatus::NotReady)
+        );
+        assert_eq!(
+            expect_live_health(&ObservedLocalHealth::bare(LocalServiceStatus::Protocol)),
+            LiveHealthExpectation::Reject(LocalServiceStatus::Protocol)
+        );
+        assert_eq!(
+            expect_live_health(&ObservedLocalHealth::bare(LocalServiceStatus::Cancelled)),
+            LiveHealthExpectation::Reject(LocalServiceStatus::Cancelled)
+        );
+        assert_eq!(
+            expect_live_health(&ObservedLocalHealth {
+                status: LocalServiceStatus::Ready,
+                ok: None,
+                ready: None,
+            }),
+            LiveHealthExpectation::Reject(LocalServiceStatus::Ready)
+        );
+    }
+
+    #[test]
+    fn live_health_probe_reports_the_actual_loopback_service() {
+        let observed = LoopbackClient::new().probe_observed().unwrap();
+        match expect_live_health(&observed) {
+            LiveHealthExpectation::SkipNoDaemon => {
+                eprintln!("SKIPPED: 127.0.0.1:{LOCAL_PORT} 沒有本機台灣語音服務，這次不斷言 Ready");
+            }
+            LiveHealthExpectation::AssertReady { ok, ready } => {
+                assert!(ok, "decoded health ok={ok}");
+                assert!(ready, "decoded health ready={ready}");
+                assert_eq!(observed.status, LocalServiceStatus::Ready);
+                assert_eq!(observed.ok, Some(true));
+                assert_eq!(observed.ready, Some(true));
+                assert_eq!(
+                    observed.status == LocalServiceStatus::Ready,
+                    observed.status.as_str() == "ready"
+                );
+            }
+            LiveHealthExpectation::Reject(status) => {
+                panic!(
+                    "127.0.0.1:{LOCAL_PORT} answered {status:?} ok={:?} ready={:?}; only Ready with both health fields true passes",
+                    observed.ok, observed.ready
+                );
+            }
+        }
     }
 
     #[test]

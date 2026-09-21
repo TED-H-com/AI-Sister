@@ -1404,7 +1404,14 @@ const AZURE_CREDENTIAL_STATES = Object.freeze([
 
 const LOCAL_TTS_ENDPOINT = "http://127.0.0.1:8231/tts";
 const LOCAL_TTS_HEALTH = "http://127.0.0.1:8231/health";
-const LOCAL_TTS_SERVICES = Object.freeze(["missing", "not_ready", "ready", "protocol"]);
+const LOCAL_TTS_SERVICES = Object.freeze([
+  "missing",
+  "not_ready",
+  "ready",
+  "protocol",
+  "cancelled",
+  "failed",
+]);
 
 let localTtsStatus = null;
 let localTtsBusy = false;
@@ -1427,6 +1434,7 @@ function localTtsView(raw) {
   if (!raw.config_readable) {
     if (
       raw.enabled !== null ||
+      raw.voice_enabled !== null ||
       raw.endpoint !== null ||
       raw.health_endpoint !== null ||
       raw.persona !== null ||
@@ -1440,6 +1448,7 @@ function localTtsView(raw) {
   }
   if (
     typeof raw.enabled !== "boolean" ||
+    typeof raw.voice_enabled !== "boolean" ||
     raw.endpoint !== LOCAL_TTS_ENDPOINT ||
     raw.health_endpoint !== LOCAL_TTS_HEALTH ||
     (raw.persona !== null && typeof raw.persona !== "string") ||
@@ -1478,20 +1487,58 @@ function paintLocalTts(raw, actionError = "") {
     el.localTtsState.classList.add("bad");
     message = "本機台灣語音設定讀不出來；沒有把它畫成可用。";
   } else if (!serviceReady && !enabled) {
-    message = "沒有偵測到本機台灣語音服務。啟動本機 BreezyVoice 後才可選用。";
+    message = localTtsUnavailableMessage(parsed.service, false);
   } else if (!enabled) {
-    message = "本機台灣語音服務已就緒，目前關閉。答案朗讀仍用系統語音。";
+    message =
+      parsed.voice_enabled === true
+        ? "本機台灣語音服務已就緒，目前關閉。答案朗讀仍用系統語音。"
+        : "本機台灣語音服務已就緒，目前關閉。答案鍵也不會用系統語音。下一步是打開「本機聲音」。";
   } else if (!serviceReady) {
     el.localTtsState.classList.add("bad");
-    message = "本機台灣語音已打開，但服務沒有回應。沒有改用系統語音或 Azure。";
-  } else if (parsed.ready) {
+    message = localTtsUnavailableMessage(parsed.service, true);
+  } else if (parsed.ready && parsed.voice_enabled === true) {
     el.localTtsState.classList.add("ok");
     message = `將用目前角色（${parsed.persona ?? "未知"}）的本機台灣語音朗讀答案。`;
+  } else if (parsed.ready && parsed.voice_enabled === false) {
+    message = "本機台灣語音這一格已經就緒，但答案鍵還不會朗讀。下一步是打開「本機聲音」。";
   } else {
     el.localTtsState.classList.add("bad");
     message = "本機台灣語音狀態不一致；沒有把它畫成已可連線。";
   }
   el.localTtsState.textContent = message;
+}
+
+function localTtsUnavailableMessage(service, enabled) {
+  if (enabled) {
+    switch (service) {
+      case "not_ready":
+        return "本機台灣語音已打開。服務有回應，但回報尚未載入完成。沒有改用系統語音或 Azure。";
+      case "protocol":
+        return "本機台灣語音已打開。埠上有回應，但不是認得的健康檢查。沒有改用系統語音或 Azure。";
+      case "cancelled":
+        return "本機台灣語音已打開。這次健康檢查已停止，還沒有服務結果。沒有改用系統語音或 Azure。";
+      case "failed":
+        return "本機台灣語音已打開。這次健康檢查沒有完成，還沒有服務結果。沒有改用系統語音或 Azure。";
+      case "missing":
+        return "本機台灣語音已打開，但服務沒有回應。沒有改用系統語音或 Azure。";
+      default:
+        return "本機台灣語音狀態不一致；沒有把它畫成已可連線。";
+    }
+  }
+  switch (service) {
+    case "not_ready":
+      return "本機台灣語音服務有回應，但回報尚未載入完成。載入完成後才可選用。";
+    case "protocol":
+      return "127.0.0.1:8231 有回應，但不是本機台灣語音認得的健康檢查。這一格不能打開。";
+    case "cancelled":
+      return "這次健康檢查已停止，還沒有本機台灣語音服務的結果。這一格不能打開。";
+    case "failed":
+      return "這次健康檢查沒有完成，還沒有本機台灣語音服務的結果。這一格不能打開。";
+    case "missing":
+      return "沒有偵測到本機台灣語音服務。啟動本機 BreezyVoice 後才可選用。";
+    default:
+      return "本機台灣語音狀態不一致；沒有把它畫成可用。";
+  }
 }
 
 async function refreshLocalTts() {
@@ -1500,6 +1547,11 @@ async function refreshLocalTts() {
     paintLocalTts(null, "這一頁不在 AI-Sister desktop 裡，沒有讀取本機台灣語音。");
     return null;
   }
+  if (localTtsBusy) {
+    localTtsRefreshQueued = true;
+    return null;
+  }
+  localTtsRefreshQueued = false;
   const revision = ++localTtsRevision;
   try {
     const status = await invoke("local_tts_read");
@@ -1519,21 +1571,30 @@ async function setLocalTtsConfig(event) {
   localTtsBusy = true;
   el.localTtsEnabled.disabled = true;
   const enabled = el.localTtsEnabled.checked === true;
-  const revision = localTtsRevision;
+  const revision = ++localTtsRevision;
   try {
     const status = await invoke("local_tts_config_set", { enabled });
     if (revision === localTtsRevision) paintLocalTts(status);
   } catch (err) {
-    await refreshLocalTts();
-    paintLocalTts(localTtsStatus, "本機台灣語音設定沒有保存。");
-  } finally {
     localTtsBusy = false;
-    if (localTtsRefreshQueued) {
-      localTtsRefreshQueued = false;
-      await refreshLocalTts();
-    } else {
-      paintLocalTts(localTtsStatus);
+    if (revision !== localTtsRevision) {
+      if (localTtsRefreshQueued) await refreshLocalTts();
+      else paintLocalTts(localTtsStatus);
+      return;
     }
+    try {
+      await refreshLocalTts();
+    } catch {
+      // 重讀自己丟例外時，不能改口成「後端回了認不得的狀態」。
+    }
+    paintLocalTts(localTtsStatus, "本機台灣語音設定沒有保存。");
+    return;
+  }
+  localTtsBusy = false;
+  if (localTtsRefreshQueued) {
+    await refreshLocalTts();
+  } else {
+    paintLocalTts(localTtsStatus);
   }
 }
 
@@ -2322,6 +2383,7 @@ function setUnreadable(on) {
       generation: localTtsStatus?.generation ?? 0,
       config_readable: false,
       enabled: null,
+      voice_enabled: null,
       endpoint: null,
       health_endpoint: null,
       service: "missing",

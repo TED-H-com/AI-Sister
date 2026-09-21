@@ -5142,7 +5142,7 @@ function usableLocalTtsStatus(raw) {
     typeof raw.enabled === "boolean" &&
     raw.endpoint === "http://127.0.0.1:8231/tts" &&
     raw.health_endpoint === "http://127.0.0.1:8231/health" &&
-    ["missing", "not_ready", "ready", "protocol"].includes(raw.service) &&
+    ["missing", "not_ready", "ready", "protocol", "cancelled", "failed"].includes(raw.service) &&
     (raw.persona === null || typeof raw.persona === "string") &&
     raw.ready === (raw.enabled && raw.service === "ready")
     ? raw

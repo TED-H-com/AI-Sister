@@ -118,6 +118,7 @@ const LOCAL_TTS_OFF = {
   generation: 3,
   config_readable: true,
   enabled: false,
+  voice_enabled: false,
   endpoint: "http://127.0.0.1:8231/tts",
   health_endpoint: "http://127.0.0.1:8231/health",
   service: "missing",
@@ -239,6 +240,8 @@ async function open({
   onAzureConfigSet,
   onAzureKeySet,
   onAzureKeyDelete,
+  onLocalTtsRead,
+  onLocalTtsConfigSet,
   onBrainRead,
   onBrainConnect,
   onBrainTest,
@@ -468,8 +471,14 @@ async function open({
             voiceState = arg.enabled;
             return { voice_enabled: voiceState };
           case "local_tts_read":
+            if (onLocalTtsRead) return onLocalTtsRead({ ...localTtsState });
             return { ...localTtsState };
           case "local_tts_config_set":
+            if (onLocalTtsConfigSet) {
+              return onLocalTtsConfigSet(arg, { ...localTtsState }, (next) => {
+                localTtsState = { ...next };
+              });
+            }
             localTtsState = {
               ...localTtsState,
               enabled: arg.enabled,
@@ -674,6 +683,9 @@ async function open({
     },
     setAzure(s) {
       azureState = { ...s };
+    },
+    setLocalTts(s) {
+      localTtsState = { ...s };
     },
     combo: () => node("[data-combo]").textContent,
     hotkeySay: () => node("[data-hotkey-say]").textContent,
@@ -1753,6 +1765,271 @@ console.log("㉚⁰ 本機台灣語音：服務未就緒時不露出可用開關
     "trusted change 才保存 enabled",
     writes.length === 1 && writes[0].arg.enabled === true,
     writes,
+  );
+}
+
+function localTtsCase(service, enabled, voiceEnabled = true) {
+  return {
+    ...LOCAL_TTS_OFF,
+    service,
+    enabled,
+    voice_enabled: voiceEnabled,
+    ready: enabled === true && service === "ready",
+    persona: "chatgpt",
+  };
+}
+
+console.log("㉚⁰ᵇ 本機台灣語音：保存失敗的那句話要留到下一次新狀態");
+{
+  const readyOff = localTtsCase("ready", false, true);
+  const rejected = await open({
+    localTts: readyOff,
+    onLocalTtsConfigSet: () => {
+      throw new Error("save failed");
+    },
+  });
+  rejected.node("[data-local-tts-enabled]").checked = true;
+  await rejected.act("[data-local-tts-enabled]", { event: "change" });
+  const savedText = rejected.node("[data-local-tts-state]").textContent;
+  check("local_tts_config_set reject 最後仍說沒有保存", savedText.includes("沒有保存"), savedText);
+  check(
+    "保存失敗後勾勾回到還沒寫進去的值",
+    rejected.node("[data-local-tts-enabled]").checked === false,
+    rejected.node("[data-local-tts-enabled]").checked,
+  );
+
+  let reads = 0;
+  const bothRejected = await open({
+    localTts: readyOff,
+    onLocalTtsRead: (state) => {
+      reads += 1;
+      if (reads > 1) throw new Error("read failed");
+      return state;
+    },
+    onLocalTtsConfigSet: () => {
+      throw new Error("save failed");
+    },
+  });
+  bothRejected.node("[data-local-tts-enabled]").checked = true;
+  await bothRejected.act("[data-local-tts-enabled]", { event: "change" });
+  const still = bothRejected.node("[data-local-tts-state]").textContent;
+  check("重讀也 reject 時最後仍是沒有保存", still.includes("沒有保存"), still);
+  check("重讀失敗不改口成認不得的狀態", !still.includes("後端沒有回傳可辨識"), still);
+}
+
+console.log("㉚⁰ᶜ 本機台灣語音：查過的服務狀態各說各話");
+{
+  const matrix = [
+    [
+      "missing",
+      false,
+      ["沒有偵測到", "啟動本機 BreezyVoice"],
+      ["尚未載入完成", "健康檢查", "將用"],
+    ],
+    [
+      "missing",
+      true,
+      ["沒有回應", "沒有改用系統語音或 Azure"],
+      ["沒有偵測到", "尚未載入完成", "健康檢查"],
+    ],
+    [
+      "not_ready",
+      false,
+      ["有回應", "尚未載入完成", "載入完成後才可選用"],
+      ["沒有偵測到", "啟動本機 BreezyVoice", "沒有回應"],
+    ],
+    [
+      "not_ready",
+      true,
+      ["服務有回應", "尚未載入完成", "沒有改用系統語音或 Azure"],
+      ["沒有回應", "沒有偵測到"],
+    ],
+    [
+      "protocol",
+      false,
+      ["不是本機台灣語音認得的健康檢查", "不能打開"],
+      ["沒有偵測到", "尚未載入完成", "已停止", "沒有完成"],
+    ],
+    [
+      "protocol",
+      true,
+      ["不是認得的健康檢查", "沒有改用系統語音或 Azure"],
+      ["沒有回應", "尚未載入完成", "沒有偵測到"],
+    ],
+    [
+      "cancelled",
+      false,
+      ["健康檢查已停止", "不能打開"],
+      ["沒有偵測到", "認得的健康檢查", "沒有完成"],
+    ],
+    [
+      "cancelled",
+      true,
+      ["健康檢查已停止", "沒有改用系統語音或 Azure"],
+      ["沒有回應", "認得的健康檢查", "沒有完成"],
+    ],
+    [
+      "failed",
+      false,
+      ["健康檢查沒有完成", "不能打開"],
+      ["已停止", "沒有偵測到", "認得的健康檢查"],
+    ],
+    [
+      "failed",
+      true,
+      ["健康檢查沒有完成", "沒有改用系統語音或 Azure"],
+      ["已停止", "沒有回應", "認得的健康檢查"],
+    ],
+    [
+      "ready",
+      false,
+      ["已就緒", "目前關閉", "答案朗讀仍用系統語音"],
+      ["將用", "本機聲音", "下一步"],
+    ],
+    [
+      "ready",
+      true,
+      ["將用目前角色（chatgpt）的本機台灣語音朗讀答案"],
+      ["尚未載入完成", "沒有回應", "沒有偵測到"],
+    ],
+  ];
+  const sentences = [];
+  for (const [service, enabled, words, absent] of matrix) {
+    const page = await open({ localTts: localTtsCase(service, enabled, true) });
+    const sentence = page.node("[data-local-tts-state]").textContent;
+    sentences.push(sentence);
+    const label = `${service}/${enabled ? "開" : "關"}`;
+    for (const word of words) {
+      check(`${label}說到「${word}」`, sentence.includes(word), sentence);
+    }
+    for (const word of absent) {
+      check(`${label}不說「${word}」`, !sentence.includes(word), sentence);
+    }
+    const canToggle = enabled === true || service === "ready";
+    check(
+      `${label}的開關${canToggle ? "可關或可開" : "不能當可用開關"}`,
+      page.node("[data-local-tts-enabled]").disabled === !canToggle,
+      page.node("[data-local-tts-enabled]").disabled,
+    );
+    if (service === "ready" && enabled === true) {
+      check(`${label}才畫成可朗讀`, page.node("[data-local-tts-state]").classList.contains("ok"), sentence);
+    } else {
+      check(`${label}不畫成可朗讀`, !page.node("[data-local-tts-state]").classList.contains("ok"), sentence);
+    }
+  }
+  check(
+    "服務狀態兩兩不是同一句",
+    new Set(sentences).size === matrix.length,
+    sentences,
+  );
+  const settingsServices = [
+    ...read(SRC)
+      .match(/const LOCAL_TTS_SERVICES = Object\.freeze\(\[([\s\S]*?)\]\)/)[1]
+      .matchAll(/"([a-z_]+)"/g),
+  ].map((match) => match[1]);
+  const appServices = [
+    ...read(join(UI, "app.js"))
+      .match(/\[((?:"[a-z_]+",?\s*)+)\]\.includes\(raw\.service\)/)[1]
+      .matchAll(/"([a-z_]+)"/g),
+  ].map((match) => match[1]);
+  const localRs = read(resolve(UI, "../../../crates/sister-tts/src/local.rs"));
+  const statusImpl = localRs.slice(
+    localRs.indexOf("impl LocalServiceStatus {"),
+    localRs.indexOf("struct ObservedLocalHealth"),
+  );
+  const rustServices = [...statusImpl.matchAll(/=> "([a-z_]+)"/g)].map((match) => match[1]);
+  check(
+    "設定頁、主視窗、Rust 認得同一組 service",
+    JSON.stringify([...settingsServices].sort()) === JSON.stringify([...appServices].sort()) &&
+      JSON.stringify([...settingsServices].sort()) === JSON.stringify([...rustServices].sort()),
+    { settingsServices, appServices, rustServices },
+  );
+}
+
+console.log("㉚⁰ᵈ 本機聲音關著時，不承諾答案鍵會朗讀");
+{
+  const opened = await open({ localTts: localTtsCase("ready", true, false) });
+  const openedText = opened.node("[data-local-tts-state]").textContent;
+  check("已開且就緒但本機聲音關著，指出下一步", openedText.includes("下一步") && openedText.includes("本機聲音"), openedText);
+  check("這時不承諾將用本機台灣語音朗讀答案", !openedText.includes("將用") && !openedText.includes("朗讀答案"), openedText);
+  check("這時不畫成可朗讀", !opened.node("[data-local-tts-state]").classList.contains("ok"), openedText);
+
+  const closed = await open({ localTts: localTtsCase("ready", false, false) });
+  const closedText = closed.node("[data-local-tts-state]").textContent;
+  check("服務就緒但兩格都關時，指出本機聲音", closedText.includes("本機聲音") && closedText.includes("下一步"), closedText);
+  check("這時不說答案朗讀仍用系統語音", !closedText.includes("答案朗讀仍用系統語音"), closedText);
+  check("這時也不承諾將用朗讀答案", !closedText.includes("將用") && !closedText.includes("朗讀答案"), closedText);
+
+  const promised = await open({ localTts: localTtsCase("ready", true, true) });
+  const promisedText = promised.node("[data-local-tts-state]").textContent;
+  check(
+    "本機聲音開著且服務就緒，才出現承諾句",
+    promisedText.includes("將用目前角色（chatgpt）的本機台灣語音朗讀答案"),
+    promisedText,
+  );
+}
+
+console.log("㉚⁰ᵉ 本機台灣語音寫入飛行中的重讀要排隊，完成後補讀");
+{
+  let reads = 0;
+  let finishWrite = null;
+  const saved = localTtsCase("ready", false, true);
+  const nativeTruth = { ...saved, enabled: true, ready: true, persona: "claude" };
+  const page = await open({
+    localTts: saved,
+    onLocalTtsRead: (state) => {
+      reads += 1;
+      return state;
+    },
+    onLocalTtsConfigSet: () =>
+      new Promise((resolveWrite) => {
+        finishWrite = () => resolveWrite({ ...saved, enabled: true, ready: true });
+      }),
+  });
+  page.node("[data-local-tts-enabled]").checked = true;
+  await page.act("[data-local-tts-enabled]", { event: "change" });
+  check("前提：本機台灣語音寫入還在飛", typeof finishWrite === "function");
+  const readsBeforeEvent = reads;
+  page.setLocalTts(nativeTruth);
+  await page.emit("local-tts-changed");
+  check("busy 時重讀先排隊，不平行讀", reads === readsBeforeEvent, reads);
+  finishWrite();
+  await tick();
+  await tick();
+  check("寫入完成後補讀恰好一次", reads === readsBeforeEvent + 1, reads);
+  const after = page.node("[data-local-tts-state]").textContent;
+  check(
+    "補讀的角色蓋過寫入回條",
+    after.includes("將用目前角色（claude）的本機台灣語音朗讀答案"),
+    after,
+  );
+}
+
+console.log("㉚⁰ᶠ 讀不出設定時 voice_enabled 只能是 null");
+{
+  const unreadable = {
+    generation: 4,
+    config_readable: false,
+    enabled: null,
+    voice_enabled: null,
+    endpoint: null,
+    health_endpoint: null,
+    service: "missing",
+    persona: null,
+    ready: false,
+    config_error: "config.toml 讀不出來。",
+  };
+  const page = await open({ localTts: unreadable });
+  check(
+    "讀不出設定不畫成可用",
+    page.node("[data-local-tts-state]").textContent.includes("設定讀不出來"),
+    page.node("[data-local-tts-state]").textContent,
+  );
+  const lied = await open({ localTts: { ...unreadable, voice_enabled: false } });
+  check(
+    "config 讀不出來卻帶 voice_enabled 不算可辨識",
+    lied.node("[data-local-tts-state]").textContent.includes("後端沒有回傳可辨識"),
+    lied.node("[data-local-tts-state]").textContent,
   );
 }
 
