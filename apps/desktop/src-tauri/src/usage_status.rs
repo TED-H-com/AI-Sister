@@ -82,6 +82,9 @@ pub struct UsageStatusView {
     pub local_files_found: u32,
     pub local_files_capped: u32,
     pub local_skipped_auth: u32,
+    pub local_skipped_deep: u32,
+    pub local_skipped_symlink: u32,
+    pub local_skipped_hidden: u32,
     pub local_scan_complete: bool,
     pub local_products: Vec<LocalProductView>,
     pub local_unknown_reason: &'static str,
@@ -128,33 +131,52 @@ pub fn read_view(runtime: &Runtime, data_dir: Option<&Path>, stopped: bool) -> U
     let generation = runtime.generation.load(Ordering::Acquire);
     let path = match sister_core::config::Config::default_path() {
         Some(path) => path,
-        None => return unreadable(generation, stopped, "找不到設定檔路徑。"),
+        None => {
+            return unreadable(
+                generation,
+                stopped,
+                sister_usage::usage_config_missing_message(),
+            );
+        }
     };
     let config = match sister_core::config::Config::load(&path) {
         Ok(config) => config,
-        Err(error) => return unreadable(generation, stopped, &format!("{error:#}")),
+        Err(error) => {
+            return unreadable(
+                generation,
+                stopped,
+                &sister_usage::usage_config_parse_message(&format!("{error:#}")),
+            );
+        }
     };
     let usage = config.shell.usage;
-    let store = match data_dir {
-        None => {
-            return unreadable(generation, stopped, "找不到資料目錄。");
-        }
-        Some(dir) => match DedupStore::load(dir) {
-            Ok(store) => store,
-            Err(_) => {
-                return unreadable(
-                    generation,
-                    stopped,
-                    "公開看板狀態讀不出來。刪掉該檔後再查。",
-                );
-            }
-        },
-    };
     let local = ConfiguredSessionAdapter::from_config(
         usage.local_sessions_enabled,
         &usage.local_sessions_dir,
     )
     .report();
+    let Some(dir) = data_dir else {
+        return board_file_unreadable(
+            generation,
+            stopped,
+            &usage,
+            local,
+            sister_usage::usage_data_dir_missing_message(),
+        );
+    };
+    let store = match DedupStore::load(dir) {
+        Ok(store) => store,
+        Err(_) => {
+            return board_file_unreadable(
+                generation,
+                stopped,
+                &usage,
+                local,
+                sister_usage::usage_store_unreadable_message(),
+            );
+        }
+    };
+    let recalled = sister_usage::recall_stored_board(&store, usage.public_status_enabled, stopped);
     project(
         generation,
         true,
@@ -163,19 +185,10 @@ pub fn read_view(runtime: &Runtime, data_dir: Option<&Path>, stopped: bool) -> U
         &usage,
         &store,
         local,
-        if stopped {
-            ServedFrom::Stopped
-        } else if !usage.public_status_enabled {
-            ServedFrom::Disabled
-        } else {
-            ServedFrom::CooldownCache
-        },
-        None,
-        usage
-            .public_status_enabled
-            .then(|| store.cached_board.clone())
-            .flatten(),
-        false,
+        recalled.served_from,
+        recalled.fetch_error,
+        recalled.board,
+        recalled.board_is_live,
     )
 }
 
@@ -189,16 +202,41 @@ pub fn refresh_blocking(
     if runtime.generation.load(Ordering::Acquire) != expected_generation {
         return Ok((read_view(runtime, data_dir, stopped), None));
     }
-    let path = sister_core::config::Config::default_path()
-        .ok_or_else(|| "找不到設定檔路徑。".to_string())?;
-    let config = sister_core::config::Config::load(&path).map_err(|error| format!("{error:#}"))?;
+    let path = match sister_core::config::Config::default_path() {
+        Some(path) => path,
+        None => {
+            return Ok((
+                unreadable(
+                    runtime.generation.load(Ordering::Acquire),
+                    stopped,
+                    sister_usage::usage_config_missing_message(),
+                ),
+                None,
+            ));
+        }
+    };
+    let config = match sister_core::config::Config::load(&path) {
+        Ok(config) => config,
+        Err(error) => {
+            return Ok((
+                unreadable(
+                    runtime.generation.load(Ordering::Acquire),
+                    stopped,
+                    &sister_usage::usage_config_parse_message(&format!("{error:#}")),
+                ),
+                None,
+            ));
+        }
+    };
     let usage = config.shell.usage;
     let Some(dir) = data_dir else {
         return Ok((
-            unreadable(
+            board_file_unreadable(
                 runtime.generation.load(Ordering::Acquire),
                 stopped,
-                "找不到資料目錄。",
+                &usage,
+                scan_configured(&usage),
+                sister_usage::usage_data_dir_missing_message(),
             ),
             None,
         ));
@@ -207,10 +245,12 @@ pub fn refresh_blocking(
         Ok(store) => store,
         Err(_) => {
             return Ok((
-                unreadable(
+                board_file_unreadable(
                     runtime.generation.load(Ordering::Acquire),
                     stopped,
-                    "公開看板狀態讀不出來。刪掉該檔後再查。",
+                    &usage,
+                    scan_configured(&usage),
+                    sister_usage::usage_store_unreadable_message(),
                 ),
                 None,
             ));
@@ -283,12 +323,20 @@ pub fn refresh_blocking(
     if runtime.generation.load(Ordering::Acquire) != expected_generation {
         return Ok((read_view(runtime, data_dir, stopped), None));
     }
-    if let Err(error) = store.save(dir) {
+    if store.save(dir).is_err() {
         return Ok((
-            unreadable(
+            project(
                 runtime.generation.load(Ordering::Acquire),
+                true,
+                Some(sister_usage::usage_store_unwritable_message().to_owned()),
                 stopped,
-                &error.to_string(),
+                &usage,
+                &store,
+                outcome.view.local_report.clone(),
+                outcome.view.served_from,
+                outcome.view.fetch_error.clone(),
+                outcome.view.board.clone(),
+                outcome.view.board_is_live,
             ),
             None,
         ));
@@ -363,6 +411,33 @@ pub fn set_from_page(
     .map_err(|error| format!("{error:#}"))
 }
 
+fn scan_configured(usage: &sister_core::config::UsageConfig) -> sister_usage::LocalUsageReport {
+    ConfiguredSessionAdapter::from_config(usage.local_sessions_enabled, &usage.local_sessions_dir)
+        .report()
+}
+
+fn board_file_unreadable(
+    generation: u64,
+    stopped: bool,
+    usage: &sister_core::config::UsageConfig,
+    local: sister_usage::LocalUsageReport,
+    error: &str,
+) -> UsageStatusView {
+    project(
+        generation,
+        true,
+        Some(error.to_owned()),
+        stopped,
+        usage,
+        &DedupStore::empty(),
+        local,
+        ServedFrom::UnreadableStore,
+        None,
+        None,
+        false,
+    )
+}
+
 fn unreadable(generation: u64, stopped: bool, error: &str) -> UsageStatusView {
     UsageStatusView {
         generation,
@@ -379,6 +454,9 @@ fn unreadable(generation: u64, stopped: bool, error: &str) -> UsageStatusView {
         local_files_found: 0,
         local_files_capped: 0,
         local_skipped_auth: 0,
+        local_skipped_deep: 0,
+        local_skipped_symlink: 0,
+        local_skipped_hidden: 0,
         local_scan_complete: true,
         local_products: Vec::new(),
         local_unknown_reason: "剩餘 token 未知。",
@@ -501,6 +579,9 @@ fn project(
         local_files_found: local.files_found,
         local_files_capped: local.files_capped,
         local_skipped_auth: local.skipped_auth_files,
+        local_skipped_deep: local.files_skipped_deep,
+        local_skipped_symlink: local.files_skipped_symlink,
+        local_skipped_hidden: local.files_skipped_hidden,
         local_scan_complete: local.scan_complete,
         local_products,
         local_unknown_reason: "剩餘 token 未知。",

@@ -226,6 +226,12 @@ pub struct LocalUsageReport {
     pub configured: bool,
     pub products: Vec<LocalProductUsage>,
     pub skipped_auth_files: u32,
+    /// Directories not entered because the walk was already at max depth.
+    pub files_skipped_deep: u32,
+    /// Symlink entries that were not followed.
+    pub files_skipped_symlink: u32,
+    /// Dot-prefixed names that were not opened.
+    pub files_skipped_hidden: u32,
     pub files_found: u32,
     pub files_read: u32,
     pub files_skipped_large: u32,
@@ -243,6 +249,9 @@ impl LocalUsageReport {
             configured: false,
             products: Vec::new(),
             skipped_auth_files: 0,
+            files_skipped_deep: 0,
+            files_skipped_symlink: 0,
+            files_skipped_hidden: 0,
             files_found: 0,
             files_read: 0,
             files_skipped_large: 0,
@@ -260,6 +269,9 @@ impl LocalUsageReport {
             configured: false,
             products: Vec::new(),
             skipped_auth_files: 0,
+            files_skipped_deep: 0,
+            files_skipped_symlink: 0,
+            files_skipped_hidden: 0,
             files_found: 0,
             files_read: 0,
             files_skipped_large: 0,
@@ -377,9 +389,9 @@ pub enum ServedFrom {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefreshReason {
+    /// Off to on. This is not a second baseline once `baseline_complete` is set.
     Enable,
     Disable,
-    Startup,
     Manual,
     Poll,
 }

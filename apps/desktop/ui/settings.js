@@ -1812,6 +1812,40 @@ async function openAzureConsent(event) {
 
 let usageStatus = null;
 
+function formatUtcStamp(ms) {
+  if (typeof ms !== "number" || !Number.isFinite(ms)) return "";
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return (
+    date.getUTCFullYear() +
+    "-" +
+    pad(date.getUTCMonth() + 1) +
+    "-" +
+    pad(date.getUTCDate()) +
+    " " +
+    pad(date.getUTCHours()) +
+    ":" +
+    pad(date.getUTCMinutes()) +
+    " UTC"
+  );
+}
+
+function previousBoardStamp(raw) {
+  const fetched = formatUtcStamp(raw?.last_success_unix_ms);
+  if (fetched) return fetched;
+  if (typeof raw?.board_updated_at === "string" && raw.board_updated_at.trim() !== "") {
+    return raw.board_updated_at.trim();
+  }
+  return "";
+}
+
+function hasPreviousBoard(raw) {
+  return (
+    (Array.isArray(raw?.products) && raw.products.length > 0) || previousBoardStamp(raw) !== ""
+  );
+}
+
 function paintUsage(raw, actionError = "") {
   if (!el.usageState) return;
   usageStatus = raw;
@@ -1841,26 +1875,61 @@ function paintUsage(raw, actionError = "") {
     message = actionError;
   } else if (!raw?.config_readable) {
     el.usageState.classList.add("bad");
-    message = "用量設定讀不出來。";
+    message =
+      typeof raw?.config_error === "string" && raw.config_error !== ""
+        ? raw.config_error
+        : "用量設定讀不出來。";
   } else if (raw.stopped) {
     message = "全停中，公開看板不會連線。";
+    if (typeof raw.config_error === "string" && raw.config_error !== "") {
+      message += `\n${raw.config_error}`;
+    }
+  } else if (typeof raw.config_error === "string" && raw.config_error !== "") {
+    el.usageState.classList.add("bad");
+    message = raw.config_error;
   } else if (!raw.enabled) {
     message = "公開看板關閉，不會送出 GET。";
   } else if (raw.fetch_error) {
     el.usageState.classList.add("bad");
     message = `公開看板這次沒查到：${raw.fetch_error}`;
+    if (hasPreviousBoard(raw)) {
+      const stamp = previousBoardStamp(raw);
+      message += stamp ? `。底下列的是上一份（${stamp}）。` : "。底下列的是上一份。";
+    }
   } else if (raw.board_live) {
     el.usageState.classList.add("ok");
-    message = "已讀到公開看板。這是全球產品公告，不是你的帳號重置證明。";
+    message = "已讀到公開看板，這是即時結果。這是全球產品公告，不是你的帳號重置證明。";
+    if (
+      Array.isArray(raw.products) &&
+      raw.products.length > 0 &&
+      raw.products.every((product) => product?.reset === "none")
+    ) {
+      message += "看板上沒有已驗證重置事件。";
+    }
   } else {
-    message = "公開看板已開啟，尚無即時結果。";
+    message = "公開看板已開啟，還沒查過。";
+  }
+  const skipBits = [];
+  if (Number(raw?.local_skipped_deep) > 0) {
+    skipBits.push(`深度超過上限的目錄 ${raw.local_skipped_deep} 個`);
+  }
+  if (Number(raw?.local_skipped_symlink) > 0) {
+    skipBits.push(`符號連結 ${raw.local_skipped_symlink} 個`);
+  }
+  if (Number(raw?.local_skipped_hidden) > 0) {
+    skipBits.push(`點開頭的項目 ${raw.local_skipped_hidden} 個`);
   }
   if (raw?.local_error) {
     message += `\n本機用量：${raw.local_error}`;
   } else if (raw?.local_sessions_enabled && raw.local_scan_complete === false) {
-    message += "\n本機用量是部分掃描。";
+    message += skipBits.length
+      ? `\n本機用量是部分掃描：${skipBits.join("、")}。`
+      : "\n本機用量是部分掃描。";
   } else if (raw?.local_sessions_enabled && (!raw.local_products || raw.local_products.length === 0)) {
     message += "\n本機用量：未知。";
+  }
+  if (raw?.local_sessions_enabled && Number(raw?.local_skipped_auth) > 0) {
+    message += `\n另有 ${raw.local_skipped_auth} 個驗證檔沒有讀。`;
   }
   el.usageState.textContent = message;
   if (!el.usageBoard) return;
@@ -1868,9 +1937,10 @@ function paintUsage(raw, actionError = "") {
   for (const local of raw?.local_products || []) {
     const observed =
       local.observed_tokens == null ? "已觀察 token：未知" : `已觀察 token：${local.observed_tokens}（本機記錄，不是帳單）`;
-    const remaining = "剩餘 token：未知";
-    const when =
-      local.observed_at_unix_ms == null ? "" : `；時間 ${local.observed_at_unix_ms}`;
+    const remaining =
+      local.remaining_tokens == null ? "剩餘 token：未知" : `剩餘 token：${local.remaining_tokens}`;
+    const observedAt = formatUtcStamp(local.observed_at_unix_ms);
+    const when = observedAt === "" ? "" : `；時間 ${observedAt}`;
     const quota =
       local.quota_used_percent == null
         ? "額度快照：未知"
@@ -1883,6 +1953,9 @@ function paintUsage(raw, actionError = "") {
       reset = `已驗證重置 ${product.announced_at || ""}`.trim();
     } else if (product.reset === "unverified") {
       reset = "有事件但未驗證，不當成重置";
+    } else if (product.reset === "other") {
+      const when = product.announced_at ? `（${product.announced_at}）` : "";
+      reset = `有一筆不是重置的事件，不當成重置${when}`;
     }
     const forecast =
       product.forecast_p24 == null

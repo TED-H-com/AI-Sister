@@ -2154,6 +2154,11 @@ console.log("㉛ Usage 開關、停止、錯誤與公開重置不把剩餘畫成
   check("剩餘 token 保持未知", board.includes("剩餘 token：未知"), board);
   check("已觀察 token 不是 0 冒充", board.includes("已觀察 token：125"), board);
   check("額度快照不是剩餘", board.includes("額度快照已用 12%") && !board.includes("剩餘 token：0"), board);
+  check(
+    "觀察時間是時鐘不是 unix 毫秒",
+    board.includes("2025-09-12 02:40 UTC") && !board.includes("1757644836000"),
+    board,
+  );
 }
 
 {
@@ -2189,6 +2194,442 @@ console.log("㉛ Usage 開關、停止、錯誤與公開重置不把剩餘畫成
   check("網路錯誤說得出沒查到", text.includes("沒查到") && text.includes("連線逾時"), text);
   check("部分掃描會講出來", text.includes("部分掃描"), text);
   check("錯誤是紅的", p.node("[data-usage-state]").classList.contains("bad"));
+}
+
+function usageText(view) {
+  return `${view.state}\n${view.board}`;
+}
+
+console.log("㉜ Usage 沒查過、上一份、即時、全停是四句");
+{
+  const p = await open();
+  async function paint(patch) {
+    p.setUsage(patch);
+    await p.emit("usage-status-changed");
+    return {
+      state: p.node("[data-usage-state]").textContent,
+      board: p.node("[data-usage-board]").textContent,
+    };
+  }
+  const never = await paint({
+    enabled: true,
+    stopped: false,
+    config_readable: true,
+    config_error: null,
+    fetch_error: null,
+    board_live: false,
+    last_success_unix_ms: null,
+    board_updated_at: null,
+    products: [],
+    local_products: [],
+  });
+  const failed = await paint({
+    enabled: true,
+    stopped: false,
+    config_readable: true,
+    config_error: null,
+    fetch_error: "連線逾時",
+    board_live: false,
+    last_success_unix_ms: 1_757_644_836_000,
+    board_updated_at: "2026-09-21T01:00:22.000Z",
+    products: [
+      {
+        id: "codex",
+        name: "Codex",
+        reset: "confirmed",
+        event_id: "codex:2026-09-12",
+        announced_at: "2026-09-12T03:20:36.000Z",
+        public_event_count: 1,
+        forecast_p24: null,
+        forecast_p48: null,
+        forecast_basis: null,
+      },
+    ],
+  });
+  const live = await paint({
+    enabled: true,
+    stopped: false,
+    config_readable: true,
+    config_error: null,
+    fetch_error: null,
+    board_live: true,
+    last_success_unix_ms: 1_757_644_836_000,
+    products: [
+      {
+        id: "codex",
+        name: "Codex",
+        reset: "confirmed",
+        event_id: "codex:2026-09-12",
+        announced_at: "2026-09-12T03:20:36.000Z",
+        public_event_count: 1,
+        forecast_p24: null,
+        forecast_p48: null,
+        forecast_basis: null,
+      },
+    ],
+  });
+  const stopped = await paint({
+    enabled: true,
+    stopped: true,
+    config_readable: true,
+    config_error: null,
+    fetch_error: null,
+    board_live: false,
+    products: [],
+  });
+  check("沒查過", never.state.includes("還沒查過"), never.state);
+  check(
+    "這次失敗且底下列的是上一份",
+    failed.state.includes("沒查到") &&
+      failed.state.includes("底下列的是上一份") &&
+      failed.state.includes("2025-09-12 02:40 UTC"),
+    failed.state,
+  );
+  check("這次成功是即時結果", live.state.includes("即時結果"), live.state);
+  check("全停", stopped.state.includes("全停"), stopped.state);
+  const four = [
+    ["沒查過", never.state],
+    ["上一份", failed.state],
+    ["即時", live.state],
+    ["全停", stopped.state],
+  ];
+  for (let i = 0; i < four.length; i++) {
+    for (let j = i + 1; j < four.length; j++) {
+      check(
+        `${four[i][0]} 和 ${four[j][0]} 不是同一句`,
+        four[i][1] !== four[j][1],
+        { a: four[i][1], b: four[j][1] },
+      );
+    }
+  }
+  const closed = await paint({
+    enabled: false,
+    stopped: false,
+    config_readable: true,
+    config_error: null,
+    fetch_error: null,
+    board_live: false,
+    products: [],
+  });
+  check(
+    "關閉也不是上面四句",
+    closed.state.includes("關閉") && four.every((entry) => entry[1] !== closed.state),
+    closed.state,
+  );
+
+  const emptyLive = await paint({
+    enabled: true,
+    stopped: false,
+    config_readable: true,
+    config_error: null,
+    fetch_error: null,
+    board_live: true,
+    products: [
+      {
+        id: "codex",
+        name: "Codex",
+        reset: "none",
+        event_id: null,
+        announced_at: null,
+        public_event_count: 0,
+        forecast_p24: null,
+        forecast_p48: null,
+        forecast_basis: null,
+      },
+    ],
+  });
+  const missed = await paint({
+    enabled: true,
+    stopped: false,
+    config_readable: true,
+    config_error: null,
+    fetch_error: "連線逾時",
+    board_live: false,
+    last_success_unix_ms: null,
+    board_updated_at: null,
+    products: [],
+  });
+  const emptyText = usageText(emptyLive);
+  const missedText = usageText(missed);
+  check(
+    "查過但看板上沒有事件",
+    emptyText.includes("沒有已驗證重置事件") && emptyText.includes("即時結果") && !emptyText.includes("沒查到"),
+    emptyText,
+  );
+  check(
+    "沒查到看板",
+    missedText.includes("沒查到") && !missedText.includes("沒有已驗證重置事件"),
+    missedText,
+  );
+  check("兩種零不是同一句", emptyText !== missedText, { emptyText, missedText });
+}
+
+console.log("㉝ Usage 設定讀不出來和看板狀態檔讀不出來不是同一句");
+{
+  const p = await open();
+  const sentences = [
+    {
+      name: "找不到設定路徑",
+      patch: {
+        config_readable: false,
+        config_error: "找不到設定檔路徑。公開看板與本機用量都還沒讀。",
+        enabled: null,
+      },
+      includes: ["找不到設定檔路徑", "都還沒讀"],
+    },
+    {
+      name: "設定解析失敗",
+      patch: {
+        config_readable: false,
+        config_error: "用量設定讀不出來：config.toml 解析失敗。公開看板與本機用量都還沒讀。",
+        enabled: null,
+      },
+      includes: ["用量設定讀不出來", "都還沒讀"],
+    },
+    {
+      name: "找不到資料目錄",
+      patch: {
+        config_readable: true,
+        enabled: true,
+        config_error: "找不到資料目錄。公開看板狀態還沒讀。本機用量仍照它自己的設定讀。",
+        fetch_error: null,
+        board_live: false,
+      },
+      includes: ["找不到資料目錄", "本機用量仍照它自己的設定讀"],
+    },
+    {
+      name: "狀態檔讀不出來",
+      patch: {
+        config_readable: true,
+        enabled: true,
+        config_error:
+          "公開看板狀態檔 usage-public-status-v1.json 讀不出來。刪掉該檔後再查。本機用量不受這個檔影響。",
+        fetch_error: null,
+        board_live: false,
+      },
+      includes: ["usage-public-status-v1.json", "刪掉該檔後再查"],
+    },
+  ];
+  const painted = [];
+  for (const sentence of sentences) {
+    p.setUsage(sentence.patch);
+    await p.emit("usage-status-changed");
+    const text = p.node("[data-usage-state]").textContent;
+    painted.push(text);
+    check(
+      sentence.name,
+      sentence.includes.every((part) => text.includes(part)),
+      text,
+    );
+  }
+  for (let i = 0; i < painted.length; i++) {
+    for (let j = i + 1; j < painted.length; j++) {
+      check(`${sentences[i].name} 和 ${sentences[j].name} 不是同一句`, painted[i] !== painted[j], {
+        a: painted[i],
+        b: painted[j],
+      });
+    }
+  }
+  check(
+    "狀態檔那句有下一步且不是設定檔那句",
+    painted[3].includes("刪掉該檔後再查") && !painted[1].includes("刪掉該檔後再查"),
+    { config: painted[1], store: painted[3] },
+  );
+}
+
+console.log("㉞ Usage 四種重置值各一句");
+{
+  const p = await open();
+  p.setUsage({
+    enabled: true,
+    board_live: true,
+    config_error: null,
+    fetch_error: null,
+    products: [
+      {
+        id: "codex",
+        name: "Codex",
+        reset: "confirmed",
+        announced_at: "2026-09-12T03:20:36.000Z",
+        event_id: "codex:1",
+        public_event_count: 1,
+        forecast_p24: null,
+        forecast_p48: null,
+        forecast_basis: null,
+      },
+      {
+        id: "claude",
+        name: "Claude",
+        reset: "unverified",
+        announced_at: "2026-09-13T00:00:00.000Z",
+        event_id: "claude:1",
+        public_event_count: 1,
+        forecast_p24: null,
+        forecast_p48: null,
+        forecast_basis: null,
+      },
+      {
+        id: "chatgpt",
+        name: "ChatGPT",
+        reset: "other",
+        announced_at: "2026-09-14T01:02:03.000Z",
+        event_id: "chatgpt:1",
+        public_event_count: 1,
+        forecast_p24: null,
+        forecast_p48: null,
+        forecast_basis: null,
+      },
+      {
+        id: "cursor",
+        name: "Cursor",
+        reset: "none",
+        announced_at: null,
+        event_id: null,
+        public_event_count: 0,
+        forecast_p24: null,
+        forecast_p48: null,
+        forecast_basis: null,
+      },
+    ],
+  });
+  await p.emit("usage-status-changed");
+  const lines = p.node("[data-usage-board]").textContent.split("\n");
+  const clause = (prefix) => {
+    const line = lines.find((item) => item.startsWith(prefix));
+    return line.replace(new RegExp(`^${prefix}`), "").replace(/。無預測$/, "");
+  };
+  const confirmed = clause("Codex ");
+  const unverified = clause("Claude ");
+  const other = clause("ChatGPT ");
+  const none = clause("Cursor ");
+  check("confirmed 有時間", confirmed.includes("已驗證重置") && confirmed.includes("2026-09-12T03:20:36.000Z"), confirmed);
+  check("unverified 單獨一句", unverified === "有事件但未驗證，不當成重置", unverified);
+  check(
+    "other 說明不是重置並帶時間",
+    other.includes("不是重置的事件") && other.includes("2026-09-14T01:02:03.000Z"),
+    other,
+  );
+  check("none 是沒有已驗證事件", none === "公開看板沒有已驗證重置事件", none);
+  const resets = [
+    ["confirmed", confirmed],
+    ["unverified", unverified],
+    ["other", other],
+    ["none", none],
+  ];
+  for (let i = 0; i < resets.length; i++) {
+    for (let j = i + 1; j < resets.length; j++) {
+      check(`${resets[i][0]} 和 ${resets[j][0]} 不是同一句`, resets[i][1] !== resets[j][1], {
+        a: resets[i][1],
+        b: resets[j][1],
+      });
+    }
+  }
+}
+
+console.log("㉟ Usage 跳過的檔要出現在狀態句");
+{
+  const p = await open();
+  p.setUsage({
+    enabled: false,
+    local_sessions_enabled: true,
+    local_scan_complete: false,
+    local_skipped_deep: 2,
+    local_skipped_symlink: 1,
+    local_skipped_hidden: 3,
+    local_products: [
+      {
+        id: "codex",
+        name: "Codex",
+        observed_tokens: 10,
+        remaining_tokens: null,
+        observed_at_unix_ms: null,
+        quota_used_percent: null,
+      },
+    ],
+  });
+  await p.emit("usage-status-changed");
+  const partial = p.node("[data-usage-state]").textContent;
+  check(
+    "部分掃描寫出深度、連結、點開頭",
+    partial.includes("部分掃描") &&
+      partial.includes("深度超過上限的目錄 2 個") &&
+      partial.includes("符號連結 1 個") &&
+      partial.includes("點開頭的項目 3 個"),
+    partial,
+  );
+  p.setUsage({
+    enabled: false,
+    local_sessions_enabled: true,
+    local_scan_complete: true,
+    local_skipped_auth: 2,
+    local_products: [
+      {
+        id: "codex",
+        name: "Codex",
+        observed_tokens: 10,
+        remaining_tokens: null,
+        observed_at_unix_ms: null,
+        quota_used_percent: null,
+      },
+    ],
+  });
+  await p.emit("usage-status-changed");
+  const auth = p.node("[data-usage-state]").textContent;
+  check("驗證檔有單獨講而且有數量", auth.includes("另有 2 個驗證檔沒有讀"), auth);
+  check("刻意不讀驗證檔不算部分掃描", !auth.includes("部分掃描"), auth);
+}
+
+console.log("㊱ Usage 剩餘 token 讀後端欄位");
+{
+  const p = await open();
+  p.setUsage({
+    enabled: true,
+    board_live: true,
+    config_error: null,
+    fetch_error: null,
+    local_sessions_enabled: true,
+    local_products: [
+      {
+        id: "codex",
+        name: "Codex",
+        observed_tokens: 125,
+        remaining_tokens: null,
+        observed_at_unix_ms: null,
+        quota_used_percent: 12,
+      },
+    ],
+    products: [],
+  });
+  await p.emit("usage-status-changed");
+  const unknown = p.node("[data-usage-board]").textContent;
+  check("remaining_tokens null 是未知", unknown.includes("剩餘 token：未知"), unknown);
+  p.setUsage({
+    enabled: true,
+    board_live: true,
+    config_error: null,
+    fetch_error: null,
+    local_sessions_enabled: true,
+    local_products: [
+      {
+        id: "codex",
+        name: "Codex",
+        observed_tokens: 125,
+        remaining_tokens: 1234,
+        observed_at_unix_ms: 1_757_644_836_000,
+        quota_used_percent: 12,
+      },
+    ],
+    products: [],
+  });
+  await p.emit("usage-status-changed");
+  const counted = p.node("[data-usage-board]").textContent;
+  check("remaining_tokens 1234 印在畫面上", counted.includes("剩餘 token：1234"), counted);
+  check("有剩餘時不再寫未知", !counted.includes("剩餘 token：未知"), counted);
+  check(
+    "有值那列的時間不是 unix 毫秒",
+    counted.includes("2025-09-12 02:40 UTC") && !counted.includes("1757644836000"),
+    counted,
+  );
 }
 
 console.log("");
