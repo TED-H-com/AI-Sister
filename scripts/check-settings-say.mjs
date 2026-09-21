@@ -144,7 +144,6 @@ const USAGE_OFF = {
   local_skipped_auth: 0,
   local_scan_complete: true,
   local_products: [],
-  local_unknown_reason: "剩餘 token 未知。",
   board_live: false,
   board_updated_at: null,
   products: [],
@@ -2384,6 +2383,152 @@ console.log("㉚ᵍ 金鑰保存或刪除失敗、而且重讀自己也丟例外
       "這兩次重讀例外都留在函式裡",
       rejections.length === 0,
       rejections.map((reason) => String(reason?.message ?? reason)),
+    );
+  } finally {
+    process.off("unhandledRejection", noteRejection);
+  }
+}
+
+function failNextAzurePaintIncluding(stateEl, needle) {
+  const original = Object.getOwnPropertyDescriptor(stateEl, "textContent");
+  let thrown = false;
+  Object.defineProperty(stateEl, "textContent", {
+    configurable: true,
+    get() {
+      return original.get.call(stateEl);
+    },
+    set(value) {
+      // 命中的那一次先丟、不寫進畫面。成功句要是已經寫上去，
+      // 只斷言「不含失敗句」會在失敗句沒蓋掉時假綠。
+      if (!thrown && String(value).includes(needle)) {
+        thrown = true;
+        throw new Error("paintAzureTts threw on the success repaint");
+      }
+      original.set.call(stateEl, value);
+    },
+  });
+  return () => thrown;
+}
+
+console.log("㉚ʰ Azure 失敗路徑的重讀、與成功路徑的重畫，丟例外都不能改口");
+{
+  // Node 15+ 會把沒人接的 rejection 直接殺掉行程。重畫例外穿出這三支時，
+  // 要先讓這支測試讀到畫面，再由斷言判紅。
+  const rejections = [];
+  const noteRejection = (reason) => {
+    rejections.push(reason);
+  };
+  process.on("unhandledRejection", noteRejection);
+  try {
+    let failRead = false;
+    const configFailed = await open({
+      azure: AZURE_OFF,
+      onAzureRead: (state) => {
+        if (failRead) throw new Error("status read blew up");
+        return state;
+      },
+      onAzureConfigSet: () => {
+        throw new Error("config write refused");
+      },
+    });
+    failRead = true;
+    failAzurePaintThatClaimsNoRequest(configFailed.node("[data-azure-state]"));
+    const rejectionsBeforeConfigFail = rejections.length;
+    configFailed.node("[data-azure-enabled]").checked = true;
+    await configFailed.act("[data-azure-enabled]", { event: "change" });
+    await tick();
+    const configFailText = configFailed.node("[data-azure-state]").textContent;
+    check(
+      "開關保存失敗而且重讀自己也丟例外時，最後一句是沒有完整存好",
+      calls(configFailed, "azure_tts_config_set").length === 1 &&
+        configFailText === "Azure 開關、區域與聲音沒有完整存好：config write refused",
+      configFailText,
+    );
+    check(
+      "這次開關失敗路徑的重畫例外留在函式裡",
+      rejections.length === rejectionsBeforeConfigFail,
+      rejections.slice(rejectionsBeforeConfigFail).map((reason) => String(reason?.message ?? reason)),
+    );
+
+    const secret = "0123456789abcdef0123456789abcdef";
+    const savedSentence =
+      "四個條件都齊了。每份最新答案完成後會自動送出正文並播放一次；答案下方的 Azure 按鈕可停止或手動重播，重播會再送一次。關閉操作成功回覆後就不再開始新的自動朗讀。";
+    const saved = await open({
+      azure: { ...AZURE_READY, credential: "missing", ready: false },
+    });
+    saved.node("[data-azure-key]").value = secret;
+    await saved.act("[data-azure-key]", { event: "input" });
+    const seenSaveThrow = failNextAzurePaintIncluding(
+      saved.node("[data-azure-state]"),
+      "四個條件都齊了",
+    );
+    const rejectionsBeforeSave = rejections.length;
+    await saved.act("[data-azure-key-save]");
+    await tick();
+    const saveText = saved.node("[data-azure-state]").textContent;
+    check(
+      "存檔成功而成功路徑重畫丟例外時，不說金鑰沒有保存，並畫出已保存狀態",
+      seenSaveThrow() === true &&
+        calls(saved, "azure_tts_key_set").length === 1 &&
+        saveText === savedSentence &&
+        !saveText.includes("金鑰沒有保存"),
+      saveText,
+    );
+    check(
+      "這次存檔成功路徑的重畫例外留在函式裡",
+      rejections.length === rejectionsBeforeSave,
+      rejections.slice(rejectionsBeforeSave).map((reason) => String(reason?.message ?? reason)),
+    );
+
+    const deletedSentence =
+      "Azure 開關與區域已有設定，但 Windows Credential Manager 裡沒有金鑰；不會送出 request。";
+    const deleted = await open({ azure: AZURE_READY });
+    const seenDeleteThrow = failNextAzurePaintIncluding(
+      deleted.node("[data-azure-state]"),
+      "Windows Credential Manager 裡沒有金鑰",
+    );
+    const rejectionsBeforeDelete = rejections.length;
+    await deleted.act("[data-azure-key-delete]");
+    await tick();
+    const deleteText = deleted.node("[data-azure-state]").textContent;
+    check(
+      "刪除成功而成功路徑重畫丟例外時，不說金鑰沒有刪掉，並畫出已刪除狀態",
+      seenDeleteThrow() === true &&
+        calls(deleted, "azure_tts_key_delete").length === 1 &&
+        deleteText === deletedSentence &&
+        !deleteText.includes("金鑰沒有刪掉"),
+      deleteText,
+    );
+    check(
+      "這次刪除成功路徑的重畫例外留在函式裡",
+      rejections.length === rejectionsBeforeDelete,
+      rejections.slice(rejectionsBeforeDelete).map((reason) => String(reason?.message ?? reason)),
+    );
+
+    const openedSentence =
+      "Azure 開關已打開，但還沒選金鑰所屬區域；沒有可用 endpoint，也不會送出 request。";
+    const opened = await open({ azure: AZURE_OFF });
+    const seenOpenThrow = failNextAzurePaintIncluding(
+      opened.node("[data-azure-state]"),
+      "還沒選金鑰所屬區域",
+    );
+    const rejectionsBeforeOpen = rejections.length;
+    opened.node("[data-azure-enabled]").checked = true;
+    await opened.act("[data-azure-enabled]", { event: "change" });
+    await tick();
+    const openText = opened.node("[data-azure-state]").textContent;
+    check(
+      "開關保存成功而成功路徑重畫丟例外時，不說沒有完整存好，並畫出已打開但未選區域",
+      seenOpenThrow() === true &&
+        calls(opened, "azure_tts_config_set").length === 1 &&
+        openText === openedSentence &&
+        !openText.includes("Azure 開關、區域與聲音沒有完整存好"),
+      openText,
+    );
+    check(
+      "這次開關保存成功路徑的重畫例外留在函式裡",
+      rejections.length === rejectionsBeforeOpen,
+      rejections.slice(rejectionsBeforeOpen).map((reason) => String(reason?.message ?? reason)),
     );
   } finally {
     process.off("unhandledRejection", noteRejection);

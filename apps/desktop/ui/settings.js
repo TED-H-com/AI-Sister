@@ -1785,7 +1785,11 @@ async function setAzureTtsConfig(event) {
       region: region === "" ? null : region,
       voice,
     });
-    if (revision === azureTtsRevision) paintAzureTts(azureStatus);
+    try {
+      if (revision === azureTtsRevision) paintAzureTts(azureStatus);
+    } catch {
+      // 保存已經完成。重畫失敗不改口成沒有完整存好。
+    }
   } catch (err) {
     azureTtsBusy = false;
     if (revision !== azureTtsRevision) {
@@ -1793,7 +1797,12 @@ async function setAzureTtsConfig(event) {
       else paintAzureTts(azureTtsStatus);
       return;
     }
-    await refreshAzureTts();
+    try {
+      await refreshAzureTts();
+    } catch {
+      // 重讀的 catch 裡若 paintAzureTts 再丟，例外會穿出 refreshAzureTts。
+      // 這次設定 request 已經送出而且失敗了，畫面不能停在「沒有送出 request」。
+    }
     paintAzureTts(
       azureTtsStatus,
       `Azure 開關、區域與聲音沒有完整存好：${String(err?.message ?? err)}`,
@@ -1822,7 +1831,11 @@ async function saveAzureTtsKey(event) {
   paintAzureTts(azureTtsStatus);
   try {
     const azureStatus = await invoke("azure_tts_key_set", { key });
-    if (revision === azureTtsRevision) paintAzureTts(azureStatus);
+    try {
+      if (revision === azureTtsRevision) paintAzureTts(azureStatus);
+    } catch {
+      // 保存已經完成。重畫失敗不改口成沒有保存。
+    }
   } catch (err) {
     azureTtsBusy = false;
     if (revision !== azureTtsRevision) {
@@ -1854,7 +1867,11 @@ async function deleteAzureTtsKey(event) {
   paintAzureTts(azureTtsStatus);
   try {
     const azureStatus = await invoke("azure_tts_key_delete");
-    if (revision === azureTtsRevision) paintAzureTts(azureStatus);
+    try {
+      if (revision === azureTtsRevision) paintAzureTts(azureStatus);
+    } catch {
+      // 刪除已經完成。重畫失敗不改口成沒有刪掉。
+    }
   } catch (err) {
     azureTtsBusy = false;
     if (revision !== azureTtsRevision) {
