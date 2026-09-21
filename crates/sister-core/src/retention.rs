@@ -100,6 +100,11 @@ pub struct PruneReport {
     /// 刪不掉的截圖仍然躺在磁碟上，而使用者以為它已經不在了。這一項要
     /// 一路傳到看得見的地方去。
     pub failed: Vec<String>,
+    /// 圖刪不掉、所以整列留著指著那個檔，但這一輪已經把那一列上的字清掉的列數。
+    ///
+    /// `frames_deleted` 不含這些列。`chunks_deleted` 也不含只有標題、沒有
+    /// 可搜尋段落的那幾列。0 是數過、沒有這種列，不是沒去剝。
+    pub words_cleared_on_kept_frames: u64,
 }
 
 impl PruneReport {
@@ -266,9 +271,12 @@ fn delete_frames_except(
 /// 搜尋會說字沒了；`ocr_blocks`、`assistive_blocks` 和畫面上的標題／網址卻
 /// 還掛在留下來的那一列上。`export_replay` 與 `assistive_blocks()` 讀的是
 /// 那幾張表，不是 FTS。列本身留下，繼續指著那張刪不掉的 PNG。
-fn strip_l0_words_from_frames(tx: &rusqlite::Transaction<'_>, ids: &[i64]) -> Result<()> {
+///
+/// 回傳的是被剝字的**列數**（這一批 `ids`），不是刪掉的 OCR 區塊數。
+/// 一列只有標題、沒有區塊，一樣算一列：標題和網址也清了。
+fn strip_l0_words_from_frames(tx: &rusqlite::Transaction<'_>, ids: &[i64]) -> Result<u64> {
     if ids.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
     let mut ocr = tx.prepare("DELETE FROM ocr_blocks WHERE frame_id = ?1")?;
     let mut assistive = tx.prepare("DELETE FROM assistive_blocks WHERE frame_id = ?1")?;
@@ -283,7 +291,7 @@ fn strip_l0_words_from_frames(tx: &rusqlite::Transaction<'_>, ids: &[i64]) -> Re
             .execute([id])
             .context("strip title and URL from kept frame")?;
     }
-    Ok(())
+    Ok(ids.len() as u64)
 }
 
 /// 帶著 `session_id` 的那八張表。
@@ -629,7 +637,7 @@ impl crate::db::Db {
         // 的那幾列，CASCADE 走不到；字仍要在這一刀消失，見
         // [`strip_l0_words_from_frames`]。
         report.frames_deleted += delete_frames_except(&tx, i64::MIN, text_cut, &kept)?;
-        strip_l0_words_from_frames(&tx, &kept)?;
+        report.words_cleared_on_kept_frames += strip_l0_words_from_frames(&tx, &kept)?;
         for (sql, col) in [
             ("DELETE FROM focus_events WHERE ts < ?1", "focus_events"),
             ("DELETE FROM clipboard_events WHERE ts < ?1", "clipboard"),
@@ -877,7 +885,7 @@ impl crate::db::Db {
         // 而他按的是「忘掉」——留著一個他以為已經不存在的檔案，比留著一列
         // 指向它的紀錄更糟。留下來，下一次再試，而且報告裡看得到。
         report.frames_deleted += delete_frames_except(&tx, from_ts, to_ts, &kept)?;
-        strip_l0_words_from_frames(&tx, &kept)?;
+        report.words_cleared_on_kept_frames += strip_l0_words_from_frames(&tx, &kept)?;
         for (sql, what) in [
             (
                 "DELETE FROM focus_events WHERE ts >= ?1 AND ts < ?2",
@@ -1669,6 +1677,217 @@ mod tests {
         assert!(
             db.search("昨天", 10).expect("search").is_empty(),
             "忘掉一段時間就該連字一起走，就算圖卡住了"
+        );
+    }
+
+    fn frame_ids_with_blocks(db: &Db) -> Vec<i64> {
+        let mut stmt = db
+            .conn()
+            .prepare(
+                "SELECT DISTINCT frame_id FROM (\
+                    SELECT frame_id FROM ocr_blocks \
+                    UNION \
+                    SELECT frame_id FROM assistive_blocks\
+                 ) AS block_frames",
+            )
+            .expect("prepare ids");
+        stmt.query_map([], |row| row.get::<_, i64>(0))
+            .expect("query ids")
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("ids")
+    }
+
+    /// 事先有區塊、事後列還在且兩張區塊表都空的幀數。
+    /// 刪掉的列不算：它已經不在 `frames` 裡。
+    fn rows_whose_blocks_went_empty(db: &Db, had_blocks: &[i64]) -> u64 {
+        had_blocks
+            .iter()
+            .filter(|&&id| {
+                let exists: i64 = db
+                    .conn()
+                    .query_row("SELECT COUNT(*) FROM frames WHERE id = ?1", [id], |row| {
+                        row.get(0)
+                    })
+                    .expect("frame");
+                if exists != 1 {
+                    return false;
+                }
+                let ocr: i64 = db
+                    .conn()
+                    .query_row(
+                        "SELECT COUNT(*) FROM ocr_blocks WHERE frame_id = ?1",
+                        [id],
+                        |row| row.get(0),
+                    )
+                    .expect("ocr");
+                let assistive: i64 = db
+                    .conn()
+                    .query_row(
+                        "SELECT COUNT(*) FROM assistive_blocks WHERE frame_id = ?1",
+                        [id],
+                        |row| row.get(0),
+                    )
+                    .expect("assistive");
+                ocr == 0 && assistive == 0
+            })
+            .count() as u64
+    }
+
+    fn stuck_capture(ts: Millis, text: &str) -> FrameCapture {
+        let mut capture = frame(ts, text);
+        capture.focus.window_title = Some(format!("標題 {text}"));
+        capture.focus.url = Some(format!("https://billing.example/{text}"));
+        capture.assistive = vec![AssistiveBlock {
+            text: format!("assistive {text}"),
+            role: "document".into(),
+            bbox: None,
+        }];
+        capture
+    }
+
+    /// 圖刪不掉的那一場，報告上的新計數等於事後查到的「區塊變空、列還在」的幀數。
+    ///
+    /// 期望值從 `ocr_blocks`／`assistive_blocks` 查出來，不是寫死的常數。
+    /// 刪得掉的那一列有區塊也會變空，但它整列消失，不算進這個數字。
+    #[test]
+    fn a_stuck_forget_counts_rows_whose_blocks_actually_went_empty() {
+        let tmp = Tmp::new("stuck-words-counted");
+        let mut db = Db::open_in_memory().expect("db");
+        let session = db.start_session("test", "0.0.1").expect("session");
+        let stuck_text = [
+            "客服 0800-111-222",
+            "帳單 0912-333-444",
+            "網址 secret.example",
+        ];
+        for (i, text) in stuck_text.iter().enumerate() {
+            let rel = format!("2026/08/{i}.png");
+            let full = tmp.path().join(&rel);
+            std::fs::create_dir_all(full.parent().expect("parent")).expect("mkdir");
+            std::fs::write(&full, vec![0u8; 40]).expect("png");
+            db.insert_frame(
+                session,
+                &stuck_capture(days_ago(1) - i as i64, text),
+                Some(&rel),
+                40,
+            )
+            .expect("insert stuck");
+            make_undeletable(tmp.path(), &rel);
+        }
+        let ok_rel = "2026/08/ok.png";
+        let ok_full = tmp.path().join(ok_rel);
+        std::fs::write(&ok_full, vec![0u8; 40]).expect("png");
+        db.insert_frame(
+            session,
+            &stuck_capture(days_ago(1) - 9, "這張刪得掉"),
+            Some(ok_rel),
+            40,
+        )
+        .expect("insert ok");
+
+        let before_blocks: i64 = db
+            .conn()
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM ocr_blocks) + (SELECT COUNT(*) FROM assistive_blocks)",
+                [],
+                |row| row.get(0),
+            )
+            .expect("blocks before");
+        assert!(
+            before_blocks > 0,
+            "這場一開始沒有區塊，0 分不出沒剝和沒東西可剝"
+        );
+        let had_blocks = frame_ids_with_blocks(&db);
+        assert!(
+            had_blocks.len() > 1,
+            "至少要有一列刪不掉、一列刪得掉，不然這個數字跟「全部」分不開"
+        );
+
+        let report = db
+            .forget(days_ago(2), NOW, Some(tmp.path()))
+            .expect("forget");
+        let emptied = rows_whose_blocks_went_empty(&db, &had_blocks);
+        assert!(emptied > 0, "沒有列的區塊變空，這條沒有在量被剝字的列");
+        assert!(
+            emptied < had_blocks.len() as u64,
+            "刪得掉的那一列整列消失，不該算進留下的：emptied={emptied} had={}",
+            had_blocks.len()
+        );
+        assert_eq!(
+            report.words_cleared_on_kept_frames, emptied,
+            "報告上的列數必須等於區塊真的變空、列還在的幀數：{report:?}"
+        );
+    }
+
+    /// 過了畫面保留期而圖刪不掉的列，字要留著，不能算進「字已清掉」。
+    /// 過了文字保留期的那一列才算。兩種失敗檔若共用一個計數，這裡會對不上。
+    #[test]
+    fn prune_counts_cleared_words_only_on_rows_whose_blocks_went_empty() {
+        let tmp = Tmp::new("stuck-prune-words-counted");
+        let mut db = Db::open_in_memory().expect("db");
+        let session = db.start_session("test", "0.0.1").expect("session");
+        let (text_kept, words_kept) = {
+            let mut insert = |age: i64, text: &str, stuck: bool| -> i64 {
+                let rel = format!("2026/08/{age}.png");
+                let full = tmp.path().join(&rel);
+                std::fs::create_dir_all(full.parent().expect("parent")).expect("mkdir");
+                std::fs::write(&full, vec![0u8; 40]).expect("png");
+                let (id, _, _) = db
+                    .insert_frame(session, &stuck_capture(days_ago(age), text), Some(&rel), 40)
+                    .expect("insert");
+                if stuck {
+                    make_undeletable(tmp.path(), &rel);
+                }
+                id
+            };
+            let text_kept = insert(400, "一年多前的帳單", true);
+            let words_kept = insert(60, "兩個月前的帳單", true);
+            let _recent = insert(1, "昨天的帳單", false);
+            (text_kept, words_kept)
+        };
+        let had_blocks = frame_ids_with_blocks(&db);
+
+        let report = db
+            .prune(
+                NOW,
+                &RetentionConfig {
+                    frames_days: 30,
+                    text_days: 365,
+                },
+                Some(tmp.path()),
+            )
+            .expect("prune");
+        let emptied = rows_whose_blocks_went_empty(&db, &had_blocks);
+        let words_kept_ocr: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM ocr_blocks WHERE frame_id = ?1",
+                [words_kept],
+                |row| row.get(0),
+            )
+            .expect("frames-days ocr");
+        assert!(
+            words_kept_ocr > 0,
+            "只過畫面保留期的字要留著，不然「變空」這條查詢沒有對照組"
+        );
+        let text_kept_still_there: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM frames WHERE id = ?1",
+                [text_kept],
+                |row| row.get(0),
+            )
+            .expect("text-days row");
+        assert_eq!(text_kept_still_there, 1, "圖刪不掉的那一列要留著");
+        assert_eq!(
+            report.words_cleared_on_kept_frames,
+            emptied,
+            "只算區塊真的變空的列，不是每一個刪不掉的檔：{report:?} failed={}",
+            report.failed.len()
+        );
+        assert!(emptied > 0, "{report:?}");
+        assert!(
+            (report.failed.len() as u64) > emptied,
+            "這場至少有一張刪不掉、字還在的圖；兩個數字一樣就分不出來"
         );
     }
 

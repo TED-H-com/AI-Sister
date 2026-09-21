@@ -1111,8 +1111,17 @@ async function forget() {
     // 「刪掉了…」擦掉，於是他按下不可逆的按鈕之後什麼回音都沒有。
     await load(stay);
     if (e.failed.length > 0) {
-      // 刪不掉的截圖還躺在磁碟上，而他以為它不在了。這句要蓋過成功那句。
-      tell(`有 ${e.failed.length} 個畫面檔刪不掉：${e.failed[0]}`, true);
+      // 刪檔沒完成。字清掉幾列是另一個數字：0 是數過、沒有列被剝字，
+      // 缺這欄是沒問到，兩種都不可以說成「字已經移除」。
+      const cleared = e.words_cleared;
+      const file = `有 ${e.failed.length} 個畫面檔刪不掉：${e.failed[0]}。`;
+      const rest =
+        typeof cleared === "number" && cleared > 0
+          ? `這 ${cleared} 列的字已經移除，畫面檔還在，下一輪只會再試刪檔。`
+          : typeof cleared === "number"
+            ? `字還在，畫面檔還在，下一輪只會再試刪檔。`
+            : `畫面檔還在，下一輪只會再試刪檔。`;
+      tell(file + rest, true);
     } else if (done.length === 0) {
       // 這裡也要接 `leftover(e)`：一段只剩下那一列空殼的時間刪下去，`done`
       // 是空的（守衛不准碰它），而畫面說「沒有東西被刪掉」——那一列還在，
@@ -2356,13 +2365,14 @@ function fakeBackend(mode = "1") {
           // 這件事。同一根釘子的第四個位置。
           actions: Math.ceil(gone.length / 5),
           // **同一根釘子的第五、第六個位置**，而這兩次都在假後端這一側：
-          // `Erasure` 有 15 欄，這裡以前只給 13。少的那兩欄在 `scale()` 裡是
+          // `Erasure` 有 16 欄，這裡以前只給 13。少的那兩欄在 `scale()` 裡是
           // `undefined > 0`（false）和 `if (undefined)`（false），所以那兩行
           // 字在開發機上**一次都不可能出現**——Tauri 起不來的時候，這裡就是
           // 唯一看得到它們的地方。加新欄位到 `Erasure` 的時候要回來補這裡。
           actions_unreadable: gone.length > 0 ? 1 : 0,
           grant: mode === "live" || mode === "booting",
           failed: [],
+          words_cleared: 0,
           missing,
           // 「那一場錄製」本身，以及**沒被帶走的那一列**。
           //

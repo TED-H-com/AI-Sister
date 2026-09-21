@@ -16,6 +16,8 @@ pub mod frames;
 pub mod ocr_languages;
 pub mod ocr_layout;
 pub mod ocr_regions;
+#[cfg(any(windows, test))]
+mod page_crop;
 pub mod recorder;
 
 /// Linux X11 擷取後端的可信啟動邊界。Wayland 明確不支援；尚未通過
