@@ -21,6 +21,7 @@
 
 #![cfg(windows)]
 
+use sister_capture::ocr_languages::is_traditional_chinese_ocr;
 use sister_capture::ocr_layout;
 use sister_capture::traits::{Ocr, RawFrame};
 use sister_capture::windows::ocr::{OcrStatus, WindowsOcr};
@@ -123,16 +124,15 @@ fn ocr_runs_at_all_from_an_unpackaged_exe() {
 ///
 /// - 這台機器**真的沒有**繁中 OCR → runner 的限制，是講好的缺席。
 /// - 裝了、我們卻沒挑到 → **`pick_engine` 壞了**，而那是會出貨的東西。
-///   `PREFERRED` 只認 `zh-Hant-TW` 和 `zh-Hant` 兩個字串；Windows 哪天回
-///   `zh-TW` 或 `zh-HK`，我們就會安靜地退回英文，然後把滿螢幕的中文讀成
-///   空白。那台機器上「中文搜尋永遠是空的」，而唯一的 annotation 說的是
-///   「這台機器沒裝語言包」——一句會讓人去裝一個已經裝好的東西的話。
+///   Preferred tags now include Traditional FOD aliases (`zh-TW` / `zh-HK` /
+///   `zh-MO`). If `available` still has a Traditional tag and we chose English,
+///   the engine lookup is wrong. That machine would search Chinese forever
+///   empty, and the only annotation must not say "language pack missing".
 ///
 /// 第二種**不准跳過**，簽了名也不行：那個簽名宣稱的是「這台機器沒有中文
 /// OCR」，而在這種機器上那句話是假的。
 fn skip_without_chinese(status: &OcrStatus, lang: &str) -> bool {
-    if lang.starts_with("zh") {
-        println!("SISTER-OCR-ZH: VERIFIED lang={lang}");
+    if is_traditional_chinese_ocr(lang) {
         return false;
     }
     let zh: Vec<&str> = status
@@ -141,14 +141,10 @@ fn skip_without_chinese(status: &OcrStatus, lang: &str) -> bool {
         .filter(|l| l.starts_with("zh"))
         .map(String::as_str)
         .collect();
-    // 繁中：Windows 正常回 `zh-Hant-TW`，但別的寫法也算——這裡認得太窄，
-    // 正好是這一段要抓的那個 bug 的形狀。
     let hant: Vec<&str> = zh
         .iter()
         .copied()
-        .filter(|l| {
-            l.starts_with("zh-Hant") || matches!(*l, "zh-TW" | "zh-HK" | "zh-MO" | "zh-Hant")
-        })
+        .filter(|l| is_traditional_chinese_ocr(l))
         .collect();
     assert!(
         hant.is_empty(),
@@ -180,6 +176,9 @@ fn skip_without_chinese(status: &OcrStatus, lang: &str) -> bool {
         } else {
             status.available.join(",")
         }
+    );
+    println!(
+        "SISTER-OCR-ZH: READY-TO-RUN cargo test -p sister-capture --test windows_ocr -- --nocapture  (requires Language.OCR~~~zh-TW; do not set SISTER_OCR_ZH_ABSENT)"
     );
     true
 }
@@ -227,6 +226,7 @@ fn chinese_comes_back_as_words_not_scattered_characters() {
             .any(|f| f.kind == sister_core::facts::FactKind::Phone),
         "辨識出來的文字抽不出電話，L1 等於沒接上：\n{text}"
     );
+    println!("SISTER-OCR-ZH: VERIFIED lang={lang}");
 }
 
 /// **整個螢幕那麼大的一張圖，讀不讀得到字。**

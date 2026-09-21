@@ -45,6 +45,7 @@ use windows::Media::Ocr::OcrEngine;
 use windows::Security::Cryptography::CryptographicBuffer;
 use windows::core::HSTRING;
 
+use crate::ocr_languages::{first_supported_ocr_language, is_traditional_chinese_ocr};
 use crate::ocr_layout::{Word, assemble_line};
 use crate::scale::OCR_MIN_SHORT_EDGE;
 use crate::traits::{Ocr, RawFrame};
@@ -307,21 +308,37 @@ impl Ocr for WindowsOcr {
 /// `IsLanguageSupported` 是真正的閘門。`TryCreateFromLanguage` 在語言不支援時
 /// 回傳的是 null，在 Rust 這邊會變成一個 `Err`——但那個 `Err` 的 HRESULT
 /// 讀起來是 0（成功）。所以**不能**去判斷它的錯誤碼，只能看成敗。
+///
+/// Preferred tags are expanded with Traditional Chinese FOD aliases
+/// (`zh-TW` / `zh-HK` / `zh-MO`) before the user-profile fallback. An English
+/// Windows profile with `Language.OCR~~~zh-TW` installed used to skip that
+/// engine and record blank Chinese.
 fn pick_engine(preferred: &[String]) -> Option<OcrEngine> {
-    for tag in preferred {
-        let Ok(lang) = Language::CreateLanguage(&HSTRING::from(tag.as_str())) else {
-            continue;
-        };
-        if !OcrEngine::IsLanguageSupported(&lang).unwrap_or(false) {
-            continue;
-        }
-        if let Ok(engine) = OcrEngine::TryCreateFromLanguage(&lang) {
-            return Some(engine);
+    if let Some(tag) = first_supported_ocr_language(preferred, |tag| engine_for_tag(tag).is_some())
+        && let Some(engine) = engine_for_tag(&tag)
+    {
+        return Some(engine);
+    }
+    if preferred.iter().any(|tag| is_traditional_chinese_ocr(tag)) {
+        for tag in available_languages() {
+            if is_traditional_chinese_ocr(&tag)
+                && let Some(engine) = engine_for_tag(&tag)
+            {
+                return Some(engine);
+            }
         }
     }
     // 偏好清單一個都沒裝：退回系統自己的選擇，好過完全沒有 OCR。
     // 這件事會透過 `OcrStatus::cjk_gap` 被講出來，不會靜靜地發生。
     OcrEngine::TryCreateFromUserProfileLanguages().ok()
+}
+
+fn engine_for_tag(tag: &str) -> Option<OcrEngine> {
+    let lang = Language::CreateLanguage(&HSTRING::from(tag)).ok()?;
+    if !OcrEngine::IsLanguageSupported(&lang).unwrap_or(false) {
+        return None;
+    }
+    OcrEngine::TryCreateFromLanguage(&lang).ok()
 }
 
 fn recognizer_tag(engine: &OcrEngine) -> Option<String> {
@@ -394,6 +411,7 @@ mod tests {
     #[test]
     fn a_machine_that_reads_chinese_has_nothing_to_say_here() {
         assert!(status("zh-Hant-TW", &["zh-Hant-TW"]).cjk_gap().is_none());
+        assert!(status("zh-TW", &["zh-TW"]).cjk_gap().is_none());
         assert!(status("ja", &["ja"]).cjk_gap().is_none());
         // 完全沒有 OCR 是另一件事（`chosen` 是 None），由別的地方講。
         assert!(OcrStatus::default().cjk_gap().is_none());

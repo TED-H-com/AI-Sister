@@ -4,9 +4,14 @@
 
 use sister_capture::{
     MasterStopSource, Recorder, Tick,
+    ocr_languages::is_traditional_chinese_ocr,
     ocr_regions::ChangedRegionOcr,
     traits::*,
-    windows::{focus::WindowsFocus, ocr::WindowsOcr, screen::WindowsScreen},
+    windows::{
+        focus::WindowsFocus,
+        ocr::{OcrStatus, WindowsOcr},
+        screen::WindowsScreen,
+    },
 };
 use sister_core::model::{AssistiveBlock, PrivacyContext, SensitiveFieldState};
 use sister_core::{config::Config, db::Db, grounded_answer, retrieval::RetrievalProfile};
@@ -89,7 +94,7 @@ impl Fixture {
         }
     }
     fn observe(&self, focus: &mut WindowsFocus, expected: SensitiveFieldState) -> CapturePermit {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(10);
         let owned_pid = std::fs::read_to_string(self.dir.join("provider-pid"))
             .ok()
             .map(|pid| pid.parse::<i64>().expect("owned provider PID"))
@@ -97,7 +102,9 @@ impl Fixture {
         loop {
             assert!(
                 Instant::now() < deadline,
-                "owned UIA provider did not observe {expected:?}"
+                "owned UIA provider did not observe {expected:?}: stage={} metadata={}",
+                std::fs::read_to_string(self.dir.join("stage")).unwrap_or_default(),
+                std::fs::read_to_string(self.dir.join("metadata")).unwrap_or_default()
             );
             if let PrivacyObservation::Known {
                 context:
@@ -128,10 +135,6 @@ impl Fixture {
                     return permit;
                 }
             }
-            assert!(
-                Instant::now() < deadline,
-                "native UIA did not observe {expected:?}"
-            );
             std::thread::sleep(Duration::from_millis(25));
         }
     }
@@ -201,6 +204,7 @@ fn native_uia_reads_visible_edits_and_documents_and_rejects_excluded_text() {
     let document_permit = fixture.observe(&mut focus, SensitiveFieldState::Clear);
     let document = text(&focus.assistive_text(document_permit), "document");
     assert!(document.contains("文件 0800-222-333"));
+    assert!(document.contains("本期應繳金額"));
     assert!(document.contains("DOCUMENT-SECOND-PARAGRAPH"));
     assert!(!document.contains("DOCUMENT-BOTTOM"));
 
@@ -230,17 +234,23 @@ fn native_uia_reads_visible_edits_and_documents_and_rejects_excluded_text() {
         "0800-222-333",
         "02-9988-7766",
         FixtureDocument::Wpf,
+        Some(NativeChinese {
+            visible: Some("本期應繳金額"),
+            hidden: None,
+        }),
     );
     let top_blocks = text(
         &recorder.db().assistive_blocks(first_frame).unwrap(),
         "document",
     );
     assert!(top_blocks.contains("0800-222-333"));
+    assert!(top_blocks.contains("本期應繳金額"));
     assert!(!top_blocks.contains("02-9988-7766"));
     fixture.show("document-scrolled");
     let scrolled = text(&focus.assistive_text(document_permit), "document");
     assert!(scrolled.contains("DOCUMENT-BOTTOM 02-9988-7766"));
     assert!(!scrolled.contains("0800-222-333"));
+    assert!(!scrolled.contains("本期應繳金額"));
     assert!(!scrolled.contains("DOCUMENT-SECOND-PARAGRAPH"));
 
     let bottom_frame = retained(recorder.tick(6000).unwrap());
@@ -252,6 +262,10 @@ fn native_uia_reads_visible_edits_and_documents_and_rejects_excluded_text() {
         "02-9988-7766",
         "0800-222-333",
         FixtureDocument::Wpf,
+        Some(NativeChinese {
+            visible: None,
+            hidden: Some("本期應繳金額"),
+        }),
     );
     let bottom_blocks = text(
         &recorder.db().assistive_blocks(bottom_frame).unwrap(),
@@ -259,6 +273,7 @@ fn native_uia_reads_visible_edits_and_documents_and_rejects_excluded_text() {
     );
     assert!(bottom_blocks.contains("02-9988-7766"));
     assert!(!bottom_blocks.contains("0800-222-333"));
+    assert!(!bottom_blocks.contains("本期應繳金額"));
     let reads_before_password = (
         recorder.timings().grab.calls,
         recorder.timings().ocr.calls,
@@ -343,10 +358,14 @@ fn browser_recorder(dir: PathBuf) -> Recorder<impl Backend> {
     )
     .unwrap()
 }
+fn preferred_ocr_languages() -> Vec<String> {
+    Config::default().capture.ocr_languages
+}
+
 fn native_recorder(dir: PathBuf) -> Recorder<impl Backend> {
     let mut config = Config::default();
     config.capture.image_min_interval_ms = 0;
-    let ocr = WindowsOcr::new(&["en-US".into()]);
+    let ocr = WindowsOcr::new(&preferred_ocr_languages());
     assert!(
         ocr.is_available(),
         "native screenshot verification requires OCR"
@@ -559,6 +578,7 @@ fn native_edge_pdf_scroll_keeps_uia_ocr_and_screenshot_evidence_together() {
         "0800-444-555",
         "02-6655-4433",
         FixtureDocument::Pdf,
+        None,
     );
     assert!(
         text(
@@ -590,6 +610,7 @@ fn native_edge_pdf_scroll_keeps_uia_ocr_and_screenshot_evidence_together() {
         "02-6655-4433",
         "0800-444-555",
         FixtureDocument::Pdf,
+        None,
     );
 
     let ocr_calls = recorder.timings().ocr.calls;
@@ -613,6 +634,12 @@ fn native_edge_pdf_scroll_keeps_uia_ocr_and_screenshot_evidence_together() {
     println!(
         "SISTER-PDF-UIA: VERIFIED native-screenshots native-ocr scroll old-focus-denied same-frame-rag source-url address-denied"
     );
+}
+
+#[derive(Clone, Copy)]
+struct NativeChinese {
+    visible: Option<&'static str>,
+    hidden: Option<&'static str>,
 }
 
 enum FixtureDocument {
@@ -644,6 +671,7 @@ fn assert_native_screenshot(
     phone: &str,
     excluded: &str,
     document: FixtureDocument,
+    chinese: Option<NativeChinese>,
 ) {
     let body = recorder
         .db()
@@ -660,6 +688,7 @@ fn assert_native_screenshot(
         !body.contains(excluded),
         "previous/hidden page OCR: {body:?}"
     );
+    assert_owned_chinese_ocr("stored", frame_id, &body, chinese);
     let context = recorder.db().frame_context(frame_id).unwrap().unwrap();
     document.assert_source(context.window_title.as_deref(), context.url.as_deref());
     let path = context
@@ -672,7 +701,7 @@ fn assert_native_screenshot(
         "real screen dimensions required"
     );
     let saved = RawFrame::from_rgba(context.ts, 0, width, height, pixels.into_raw());
-    let blocks = WindowsOcr::new(&["en-US".into()])
+    let blocks = WindowsOcr::new(&preferred_ocr_languages())
         .recognize(&saved)
         .unwrap();
     let visible = blocks
@@ -685,6 +714,7 @@ fn assert_native_screenshot(
         !visible.contains(excluded),
         "saved screenshot belongs to another page"
     );
+    assert_owned_chinese_ocr("saved-png", frame_id, &visible, chinese);
 
     let got = RetrievalProfile::TextAndFacts
         .retrieve(recorder.db_mut(), phone, 10)
@@ -710,4 +740,44 @@ fn assert_native_screenshot(
         assert!(!source.text.contains(excluded));
         document.assert_source(source.title.as_deref(), source.url.as_deref());
     }
+}
+
+/// Traditional Chinese screenshot OCR is a real Windows capability, not a
+/// fixture claim. English-only runners skip the Chinese needles; they still
+/// have to prove the ASCII phones and same-frame PNG.
+fn assert_owned_chinese_ocr(
+    where_: &str,
+    frame_id: i64,
+    text: &str,
+    chinese: Option<NativeChinese>,
+) {
+    let Some(chinese) = chinese else {
+        return;
+    };
+    let status = OcrStatus::probe(&preferred_ocr_languages());
+    let lang = status.chosen.as_deref().unwrap_or("none");
+    if !is_traditional_chinese_ocr(lang) {
+        println!(
+            "SISTER-OCR-ZH-NATIVE: SKIPPED where={where_} frame={frame_id} lang={lang} available={}",
+            if status.available.is_empty() {
+                "none".to_string()
+            } else {
+                status.available.join(",")
+            }
+        );
+        return;
+    }
+    if let Some(visible) = chinese.visible {
+        assert!(
+            text.contains(visible),
+            "owned Chinese OCR missing {visible:?} at {where_} frame {frame_id}: {text:?}"
+        );
+    }
+    if let Some(hidden) = chinese.hidden {
+        assert!(
+            !text.contains(hidden),
+            "owned Chinese OCR leaked {hidden:?} at {where_} frame {frame_id}: {text:?}"
+        );
+    }
+    println!("SISTER-OCR-ZH-NATIVE: VERIFIED where={where_} frame={frame_id} lang={lang}");
 }

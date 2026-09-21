@@ -16,6 +16,58 @@ public static class SisterEdgeWindow {
     [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint x, uint y, uint data, UIntPtr extra);
 }
 '@
+function Get-SisterFocusedElement {
+    try { return [System.Windows.Automation.AutomationElement]::FocusedElement } catch { return $null }
+}
+function Write-SisterUiaMetadata {
+    param([IntPtr]$Hwnd, [string[]]$Extra)
+    $node = Get-SisterFocusedElement
+    $metadata = @()
+    for ($depth = 0; $depth -lt 8 -and $null -ne $node; $depth++) {
+        $current = $node.Current
+        $metadata += "$depth type=$($current.ControlType.ProgrammaticName) class=$($current.ClassName) rect=$($current.BoundingRectangle) password=$($current.IsPassword) offscreen=$($current.IsOffscreen) focused=$($current.HasKeyboardFocus) text=$($node.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty))"
+        if ($current.NativeWindowHandle -eq $Hwnd.ToInt64()) { break }
+        $node = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($node)
+    }
+    if ($Extra) { $metadata += $Extra }
+    [IO.File]::WriteAllText((Join-Path $StateDir 'metadata'), ($metadata -join "`n"))
+}
+function Get-SisterPdfPage {
+    try {
+        $focused = Get-SisterFocusedElement
+        if ($null -eq $focused) { return $null }
+        if ($focused.Current.ControlType -ne [System.Windows.Automation.ControlType]::Group) { return $null }
+        $parent = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($focused)
+        if ($null -eq $parent) { return $null }
+        if ($parent.Current.ControlType -ne [System.Windows.Automation.ControlType]::Document) { return $null }
+        if (-not $parent.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) { return $null }
+        $pattern = $parent.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+        $scope = $pattern.RangeFromChild($focused).GetText(1024)
+        $visible = (@($pattern.GetVisibleRanges() | ForEach-Object { $_.GetText(1024) })) -join '|'
+        return [pscustomobject]@{
+            Offscreen = [bool]$focused.Current.IsOffscreen
+            Scope = $scope
+            Visible = $visible
+        }
+    } catch {
+        return $null
+    }
+}
+function Test-SisterHtmlDocumentFocused {
+    $focused = Get-SisterFocusedElement
+    if ($null -eq $focused) { return $false }
+    try {
+        return ($focused.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document -and $focused.Current.HasKeyboardFocus)
+    } catch {
+        return $false
+    }
+}
+function Invoke-SisterViewportClick {
+    param([int]$X, [int]$Y)
+    [SisterEdgeWindow]::SetCursorPos($X, $Y) | Out-Null
+    [SisterEdgeWindow]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
+    [SisterEdgeWindow]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
+}
 $browser = $null
 $backdrop = $null
 . (Join-Path $PSScriptRoot 'uia-backdrop.ps1')
@@ -80,9 +132,10 @@ window.addEventListener('keydown', event => {
     [IO.File]::WriteAllText((Join-Path $StateDir 'document-name'), [IO.Path]::GetFileName($documentPath))
     $uri = ([Uri]$documentPath).AbsoluteUri
     $profile = Join-Path $StateDir 'edge-profile'
-    $browser = Start-Process -FilePath $edge -ArgumentList @("--user-data-dir=`"$profile`"", '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-component-update', '--disable-sync', '--force-renderer-accessibility', '--new-window', "`"$uri`"") -PassThru
+    $browser = Start-Process -FilePath $edge -ArgumentList @("--user-data-dir=`"$profile`"", '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-component-update', '--disable-sync', '--hide-crash-restore-bubble', '--force-renderer-accessibility', '--new-window', "`"$uri`"") -PassThru
     [IO.File]::WriteAllText((Join-Path $StateDir 'provider-pid'), [string]$browser.Id)
-    $deadline = [DateTime]::UtcNow.AddSeconds(90)
+    $started = [DateTime]::UtcNow
+    $deadline = $started.AddSeconds(90)
     $last = ''
     $sent = ''
     $activated = [DateTime]::MinValue
@@ -94,112 +147,118 @@ window.addEventListener('keydown', event => {
         $mode = if (Test-Path $request) { [IO.File]::ReadAllText($request) } else { '' }
         if ($mode -eq 'stop') { break }
         $hwnd = $browser.MainWindowHandle
-        if ($mode -and $mode -ne $last -and $hwnd -ne [IntPtr]::Zero) {
-            [SisterEdgeWindow]::SetWindowPos($hwnd, [IntPtr]::new(-1), 40, 40, 760, 620, 0) | Out-Null
-            [SisterEdgeWindow]::SetForegroundWindow($hwnd) | Out-Null
-            [uint32]$foregroundPid = 0
-            $foreground = [SisterEdgeWindow]::GetForegroundWindow()
-            [SisterEdgeWindow]::GetWindowThreadProcessId($foreground, [ref]$foregroundPid) | Out-Null
-            if ($foreground -ne $hwnd -or $foregroundPid -ne $browser.Id) { Start-Sleep -Milliseconds 40; continue }
-            if ($sent -ne $mode) {
-                if ($Pdf -and $mode -eq 'bottom') {
-                    # Scroll without transferring accessibility focus. Edge can
-                    # leave it on the old, now offscreen page; OCR must continue.
-                    [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'scrolling PDF bottom with old focus')
-                    [System.Windows.Forms.SendKeys]::SendWait('^{END}{PGDN}{PGDN}')
-                } elseif ($Pdf -and $mode -ne 'address') {
-                    if (-not $browser.MainWindowTitle.Contains('reader.pdf') -or ([DateTime]::UtcNow - $activated).TotalSeconds -lt 1) {
-                        Start-Sleep -Milliseconds 100
-                        continue
+        if ($hwnd -eq [IntPtr]::Zero) {
+            if (([DateTime]::UtcNow - $started).TotalSeconds -ge 30) {
+                throw "Owned Edge never created a window (title='$($browser.MainWindowTitle)')"
+            }
+            [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'waiting for Edge window')
+            Start-Sleep -Milliseconds 40
+            continue
+        }
+        if (-not $mode -or $mode -eq $last) {
+            Start-Sleep -Milliseconds 40
+            continue
+        }
+        [SisterEdgeWindow]::SetWindowPos($hwnd, [IntPtr]::new(-1), 40, 40, 760, 620, 0) | Out-Null
+        [SisterEdgeWindow]::SetForegroundWindow($hwnd) | Out-Null
+        [uint32]$foregroundPid = 0
+        $foreground = [SisterEdgeWindow]::GetForegroundWindow()
+        [SisterEdgeWindow]::GetWindowThreadProcessId($foreground, [ref]$foregroundPid) | Out-Null
+        if ($foreground -ne $hwnd -or $foregroundPid -ne $browser.Id) {
+            [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'waiting for owned Edge foreground')
+            Start-Sleep -Milliseconds 40
+            continue
+        }
+        $stale = ($sent -eq $mode) -and (([DateTime]::UtcNow - $activated).TotalSeconds -ge 1)
+        if ($sent -ne $mode) {
+            $acted = $false
+            if ($Pdf -and $mode -eq 'bottom') {
+                # Scroll without transferring accessibility focus. Edge can
+                # leave it on the old, now offscreen page; OCR must continue.
+                [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'scrolling PDF bottom with old focus')
+                [System.Windows.Forms.SendKeys]::SendWait('^{END}{PGDN}{PGDN}')
+                $acted = $true
+            } elseif ($Pdf -and $mode -ne 'address') {
+                if (-not $browser.MainWindowTitle.Contains('reader.pdf')) {
+                    [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'waiting for PDF title')
+                    Start-Sleep -Milliseconds 100
+                    continue
+                }
+                if ($mode -ne 'top') { throw "Unknown PDF fixture mode: $mode" }
+                [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'activating PDF viewport')
+                Invoke-SisterViewportClick 400 350
+                [System.Windows.Forms.SendKeys]::SendWait('^{HOME}')
+                $acted = $true
+            } else {
+                switch ($mode) {
+                    'top' {
+                        if ($browser.MainWindowTitle.StartsWith('Sister Edge top')) {
+                            [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'activating HTML document')
+                            Invoke-SisterViewportClick 400 250
+                            $acted = $true
+                        } else {
+                            [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'waiting for HTML title')
+                        }
                     }
-                    # Only activate our verified foreground viewport. Separate
-                    # clicks cannot be interpreted as PDF double-click zoom.
-                    [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), "paging PDF $mode")
-                    [SisterEdgeWindow]::SetCursorPos(400, 350) | Out-Null
-                    [SisterEdgeWindow]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
-                    [SisterEdgeWindow]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
-                    $activated = [DateTime]::UtcNow
-                    if ($mode -ne 'top') { throw "Unknown PDF fixture mode: $mode" }
-                    [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'sending PDF Home')
-                    [System.Windows.Forms.SendKeys]::SendWait('^{HOME}')
+                    'bottom' { [System.Windows.Forms.SendKeys]::SendWait('{F8}'); $acted = $true }
+                    'password' { [System.Windows.Forms.SendKeys]::SendWait('{F9}'); $acted = $true }
+                    'group' { [System.Windows.Forms.SendKeys]::SendWait('{F10}'); $acted = $true }
+                    'address' { [System.Windows.Forms.SendKeys]::SendWait('^l'); $acted = $true }
+                    default { throw "Unknown fixture mode: $mode" }
+                }
+            }
+            if (-not $acted) {
+                Start-Sleep -Milliseconds 40
+                continue
+            }
+            $sent = $mode
+            $activated = [DateTime]::UtcNow
+        } elseif ($stale) {
+            # Re-send only when the focused control is still the wrong kind or
+            # the wrong PDF page. Do not poke a document that is already the
+            # provider we want while its text pattern is still filling in.
+            if ($Pdf -and $mode -eq 'top') {
+                $page = Get-SisterPdfPage
+                if ($null -eq $page) {
+                    [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'PDF focus is not a page group; activating again')
+                    $sent = ''
+                    continue
+                }
+            } elseif ($mode -in @('top', 'bottom') -and -not $Pdf) {
+                if (-not (Test-SisterHtmlDocumentFocused)) {
+                    [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'HTML focus is not Document; activating again')
+                    $sent = ''
+                    continue
+                }
+            }
+        }
+        $browser.Refresh()
+        $ready = $false
+        $extra = @()
+        if ($Pdf -and $mode -ne 'address') {
+            [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'reading direct PDF document')
+            $page = Get-SisterPdfPage
+            if ($null -ne $page) {
+                $extra += "focused-page=[$($page.Scope)] visible=[$($page.Visible)] offscreen=$($page.Offscreen)"
+                if ($mode -eq 'bottom') {
+                    $ready = $page.Offscreen -and $page.Scope.Contains('PDF-FIRST') -and $page.Visible.Contains('PDF-SECOND') -and -not $page.Visible.Contains('PDF-FIRST')
                 } else {
-                    switch ($mode) {
-                        'top' {
-                            if ($browser.MainWindowTitle.StartsWith('Sister Edge top') -and ([DateTime]::UtcNow - $activated).TotalSeconds -ge 1) {
-                                # Loading the page can focus its DOM before Edge owns
-                                # the foreground. Activate our document viewport too.
-                                [SisterEdgeWindow]::SetCursorPos(400, 250) | Out-Null
-                                [SisterEdgeWindow]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
-                                [SisterEdgeWindow]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
-                                $activated = [DateTime]::UtcNow
-                            }
-                        }
-                        'bottom' { [System.Windows.Forms.SendKeys]::SendWait('{F8}') }
-                        'password' { [System.Windows.Forms.SendKeys]::SendWait('{F9}') }
-                        'group' { [System.Windows.Forms.SendKeys]::SendWait('{F10}') }
-                        'address' { [System.Windows.Forms.SendKeys]::SendWait('^l') }
-                        default { throw "Unknown fixture mode: $mode" }
-                    }
+                    $ready = -not $page.Offscreen -and $page.Scope.Contains('PDF-FIRST') -and $page.Visible.Contains('PDF-FIRST')
                 }
-                $sent = $mode
+            } else {
+                $extra += 'focused-page=none'
             }
-            $browser.Refresh()
-            if ($Pdf -or $mode -eq 'address' -or $browser.MainWindowTitle.StartsWith("Sister Edge $mode")) {
-                # Only describe metadata under this owned foreground window. This
-                # makes a native provider mismatch diagnosable without product logging.
-                [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'reading focused metadata')
-                $node = [System.Windows.Automation.AutomationElement]::FocusedElement
-                $metadata = @()
-                for ($depth = 0; $depth -lt 8 -and $null -ne $node; $depth++) {
-                    $current = $node.Current
-                    $metadata += "$depth type=$($current.ControlType.ProgrammaticName) class=$($current.ClassName) rect=$($current.BoundingRectangle) password=$($current.IsPassword) offscreen=$($current.IsOffscreen) focused=$($current.HasKeyboardFocus) text=$($node.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty))"
-                    if ($current.NativeWindowHandle -eq $hwnd.ToInt64()) { break }
-                    $node = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($node)
-                }
-                if ($Pdf -and $mode -ne 'address') {
-                    # Wait for the native PDF accessibility provider to expose
-                    # its document. Do not accept or manufacture captured text.
-                    [IO.File]::WriteAllText((Join-Path $StateDir 'metadata'), ($metadata -join "`n"))
-                    $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
-                    $expectedPage = if ($mode -eq 'bottom') { 'PDF-SECOND' } else { 'PDF-FIRST' }
-                    $pageReady = $false
-                    if ($focused.Current.ControlType -eq [System.Windows.Automation.ControlType]::Group) {
-                        $parent = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($focused)
-                        if ($parent.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document -and $parent.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)) {
-                            [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'reading direct PDF document')
-                            $pattern = $parent.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
-                            $scope = $pattern.RangeFromChild($focused).GetText(1024)
-                            $visible = (@($pattern.GetVisibleRanges() | ForEach-Object { $_.GetText(1024) })) -join '|'
-                            if ($mode -eq 'bottom') {
-                                $pageReady = $focused.Current.IsOffscreen -and $scope.Contains('PDF-FIRST') -and $visible.Contains($expectedPage) -and -not $visible.Contains('PDF-FIRST')
-                            } else {
-                                $pageReady = -not $focused.Current.IsOffscreen -and $scope.Contains($expectedPage) -and $visible.Contains($expectedPage)
-                            }
-                            $metadata += "focused-page=[$scope] visible=[$visible]"
-
-                        }
-                    }
-                    [IO.File]::WriteAllText((Join-Path $StateDir 'metadata'), ($metadata -join "`n"))
-                    if (-not $pageReady) {
-                        if ($mode -ne 'bottom') { $sent = '' }
-                        Start-Sleep -Milliseconds 100
-                        continue
-                    }
-                } elseif ($mode -in @('top', 'bottom')) {
-                    # The title describes DOM state, not native keyboard focus.
-                    # Do not tell the test it can read while UIA still sees a Pane.
-                    $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
-                    if ($focused.Current.ControlType -ne [System.Windows.Automation.ControlType]::Document -or -not $focused.Current.HasKeyboardFocus) {
-                        [IO.File]::WriteAllText((Join-Path $StateDir 'metadata'), ($metadata -join "`n"))
-                        $sent = ''
-                        Start-Sleep -Milliseconds 100
-                        continue
-                    }
-                }
-                [IO.File]::WriteAllText((Join-Path $StateDir 'metadata'), ($metadata -join "`n"))
-                [IO.File]::WriteAllText((Join-Path $StateDir 'ready'), $mode)
-                $last = $mode
-            }
+        } elseif ($mode -in @('top', 'bottom')) {
+            [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'waiting for HTML Document focus')
+            $ready = (Test-SisterHtmlDocumentFocused) -and $browser.MainWindowTitle.StartsWith("Sister Edge $mode")
+        } elseif ($Pdf -or $mode -eq 'address' -or $browser.MainWindowTitle.StartsWith("Sister Edge $mode")) {
+            $ready = $true
+        }
+        Write-SisterUiaMetadata -Hwnd $hwnd -Extra $extra
+        if ($ready) {
+            [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), "ready $mode")
+            [IO.File]::WriteAllText((Join-Path $StateDir 'ready'), $mode)
+            $last = $mode
         }
         Start-Sleep -Milliseconds 40
     }

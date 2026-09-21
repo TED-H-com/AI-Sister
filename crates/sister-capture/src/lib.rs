@@ -13,6 +13,7 @@ mod backend_identity;
 pub mod browsers;
 pub mod footprint;
 pub mod frames;
+pub mod ocr_languages;
 pub mod ocr_layout;
 pub mod ocr_regions;
 pub mod recorder;

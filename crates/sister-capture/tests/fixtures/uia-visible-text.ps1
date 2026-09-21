@@ -29,7 +29,7 @@ $document.IsReadOnly = $true
 $document.FontSize = 18
 $document.Margin = '16'
 $document.VerticalScrollBarVisibility = 'Auto'
-$lines = @("$([char]0x6587)$([char]0x4ef6) 0800-222-333", 'DOCUMENT-SECOND-PARAGRAPH') + (1..120 | ForEach-Object { "padding $_" }) + @('DOCUMENT-BOTTOM 02-9988-7766')
+$lines = @("$([char]0x6587)$([char]0x4ef6) 0800-222-333", "$([char]0x672c)$([char]0x671f)$([char]0x61c9)$([char]0x7e73)$([char]0x91d1)$([char]0x984d)", 'DOCUMENT-SECOND-PARAGRAPH') + (1..120 | ForEach-Object { "padding $_" }) + @('DOCUMENT-BOTTOM 02-9988-7766')
 foreach ($line in $lines) {
     $paragraph = New-Object System.Windows.Documents.Paragraph
     $paragraph.Inlines.Add((New-Object System.Windows.Documents.Run -ArgumentList $line))
