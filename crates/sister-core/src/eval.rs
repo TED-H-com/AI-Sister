@@ -1212,6 +1212,7 @@ fn run_brain_for_eval(
             after_core_start: None,
             only_core_start: None,
             existing_l2: brain::ExistingL2::Keep,
+            attempted_corrections: None,
         };
         brain::run(&mut input, control_data_dir)?
     };

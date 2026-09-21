@@ -7,6 +7,7 @@
 //! [`Handle::ping`]：一次 `AtomicBool::store`，不開連線、不查詢、不等待。
 //! 模型 CLI 卡住也只卡住這條慢路徑；擷取迴圈看都看不到它。
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -475,6 +476,8 @@ struct Engine {
     history_state: Option<L2BackfillState>,
     recorded_no_consent: bool,
     budget_exhausted: bool,
+    /// 同章修正失敗時記住當時最新可引用證據時間。同一快照不每拍重試。
+    correction_attempts: BTreeMap<Millis, Millis>,
     report: Report,
 }
 
@@ -499,6 +502,7 @@ impl Engine {
             history_state: None,
             recorded_no_consent: false,
             budget_exhausted: false,
+            correction_attempts: BTreeMap::new(),
         })
     }
 
@@ -666,6 +670,7 @@ impl Engine {
         } else {
             self.interpret_cursor
         };
+        let attempted = self.correction_attempts.clone();
         let mut input = InterpretInput {
             db: &mut self.db,
             consent: &consent,
@@ -678,6 +683,7 @@ impl Engine {
             after_core_start,
             only_core_start,
             existing_l2: brain::ExistingL2::Keep,
+            attempted_corrections: Some(&attempted),
         };
         let dry = brain::prepare(&mut input, &self.data_dir)?;
         match &dry.skip {
@@ -716,6 +722,7 @@ impl Engine {
                     return Ok(());
                 }
                 let attempted_core = dry.jobs[0].core_started_at;
+                let snapshot_ts = dry.jobs[0].newest_citable_ts;
                 self.report.interpreter_wakes += 1;
                 let result = brain::run(&mut input, &self.data_dir)?;
                 self.report.interpreter_jobs += result.ran.len() as u32;
@@ -726,8 +733,22 @@ impl Engine {
                     .iter()
                     .filter(|j| j.previous.is_some() && !j.outcome.wrote_card())
                     .count() as u32;
+                if let Some(ts) = snapshot_ts.filter(|_| {
+                    result.ran.iter().any(|job| {
+                        job.segment_ref == dry.jobs[0].segment_ref && !job.outcome.wrote_card()
+                    })
+                }) {
+                    self.correction_attempts
+                        .entry(attempted_core)
+                        .and_modify(|old| *old = (*old).max(ts))
+                        .or_insert(ts);
+                }
                 if !include_open && !result.ran.is_empty() {
-                    self.interpret_cursor = Some(attempted_core);
+                    self.interpret_cursor = Some(
+                        self.interpret_cursor
+                            .map(|old| old.max(attempted_core))
+                            .unwrap_or(attempted_core),
+                    );
                 }
                 // 有跑到一段就很可能還有 backlog；下一拍立刻重查。若其實沒有，
                 // 下一次 collect_jobs 會回空並把這個旗標留在 false。
@@ -832,6 +853,7 @@ impl Engine {
             after_core_start: None,
             only_core_start: None,
             existing_l2: brain::ExistingL2::RefreshInterpreter,
+            attempted_corrections: None,
         };
         let dry = brain::prepare(&mut input, &self.data_dir)?;
         match &dry.skip {
@@ -2595,5 +2617,219 @@ sys.stdout.buffer.write(json.dumps(card).encode('utf-8'))
                 }
             }
         }
+    }
+
+    fn overwrite_cli_stdout(script: &Path, json: &str) {
+        std::fs::write(
+            script,
+            format!(
+                "import sys, pathlib\n\
+                 sys.stdin.buffer.read()\n\
+                 pathlib.Path(sys.argv[1]).write_text('started')\n\
+                 sys.stdout.buffer.write({json:?}.encode('utf-8'))\n"
+            ),
+        )
+        .expect("overwrite fake CLI");
+    }
+
+    fn add_closed_followup_chapter(db: &mut Db, ts: Millis) {
+        let sid: i64 = db
+            .conn()
+            .query_row(
+                "SELECT id FROM sessions ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("session");
+        // 工作集窗口是 5 分鐘，太近的 app 切換會被黏回去，Activity 就看不到
+        // 「已關閉的後一段」。這裡跨過窗口，讓 chrome 那章真的關上。
+        for offset in [540_000, 560_000] {
+            db.insert_focus(
+                sid,
+                &FocusEvent {
+                    ts: ts + offset,
+                    kind: FocusKind::Focus,
+                    snapshot: FocusSnapshot {
+                        app_id: Some("notion.exe".into()),
+                        ..Default::default()
+                    },
+                },
+            )
+            .expect("followup focus");
+        }
+    }
+
+    fn insert_later_frame(db: &mut Db, ts: Millis, offset: Millis, mark: &str, dhash: u64) -> i64 {
+        let sid: i64 = db
+            .conn()
+            .query_row(
+                "SELECT id FROM sessions ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("session");
+        let frame = FrameCapture {
+            assistive: Vec::new(),
+            ts: ts + offset,
+            monitor: 0,
+            width: 100,
+            height: 100,
+            dhash,
+            image: None,
+            image_ext: "png",
+            ocr: vec![OcrBlock {
+                text: format!("error[E0425]: {mark}"),
+                x: 0,
+                y: 0,
+                w: 10,
+                h: 10,
+                confidence: 1.0,
+            }],
+            focus: FocusSnapshot {
+                app_id: Some("code.exe".into()),
+                ..Default::default()
+            },
+        };
+        db.insert_frame(sid, &frame, None, 0)
+            .expect("later frame")
+            .0
+    }
+
+    #[test]
+    fn failed_same_chapter_correction_does_not_starve_later_work() {
+        let tmp = Tmp::new("corr-fail-progress");
+        grant_cloud(&tmp.0);
+        let mut db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+        let ts = 1_700_000_431_000;
+        seed_worth(&mut db, ts);
+        add_closed_followup_chapter(&mut db, ts);
+        let segs = db.chapters_for_range(ts, ts + 600_000).expect("segs");
+        assert!(
+            segs.len() >= 3,
+            "要有已關閉的後一段才測得到不餓死：{segs:?}"
+        );
+        let first = segs[0].core_started_at;
+        let second = segs[1].core_started_at;
+        let sentinel = tmp.0.join("corr-fail");
+        let (command, args) = chaining_fake_cli(&tmp.0, &sentinel);
+        let brain = BrainConfig {
+            command: command.clone(),
+            args: args.clone(),
+            ..Default::default()
+        };
+        let mut engine = Engine::new(db, tmp.0.clone(), brain, ts).expect("engine");
+        engine
+            .step(ts + 601_000, Step::Activity)
+            .expect("first card");
+        assert_eq!(engine.report.interpreter_cards, 1);
+        engine
+            .db
+            .conn()
+            .execute(
+                "UPDATE l2_card SET created_at = ?1 WHERE segment_core_start = ?2",
+                [ts + 40_000, first],
+            )
+            .expect("backdate");
+        insert_later_frame(&mut engine.db, ts, 90_000, "CORR_FAIL_MARK", 11);
+        overwrite_cli_stdout(Path::new(&engine.brain.args[0]), "");
+        engine
+            .step(ts + 601_000, Step::Activity)
+            .expect("failed correction");
+        assert_eq!(
+            engine
+                .db
+                .l2_versions_for_segment(first)
+                .expect("versions after fail")
+                .len(),
+            1,
+            "失敗的修正不可以寫新卡"
+        );
+        assert!(
+            engine.correction_attempts.get(&first).is_some(),
+            "失敗快照要記下來：{:?}",
+            engine.correction_attempts
+        );
+        let jobs_after_fail = engine.report.interpreter_jobs;
+        engine
+            .step(ts + 601_000, Step::Activity)
+            .expect("later chapter");
+        let segs_now = engine
+            .db
+            .chapters_for_range(ts, ts + 601_000)
+            .expect("segs now");
+        assert!(
+            engine.report.interpreter_jobs > jobs_after_fail,
+            "同一快照失敗後要去想後面的段：{:?} cursor={:?} attempts={:?} cores={:?}",
+            engine.report,
+            engine.interpret_cursor,
+            engine.correction_attempts,
+            segs_now
+                .iter()
+                .map(|s| (s.core_started_at, s.app.clone(), s.cut_kinds.clone()))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            engine
+                .db
+                .l2_versions_for_segment(first)
+                .expect("first still one")
+                .len(),
+            1,
+            "不可以再拿同一快照把第一段問到預算燒完"
+        );
+        let _ = second;
+    }
+
+    #[test]
+    fn genuine_new_evidence_after_failed_correction_may_retry() {
+        let tmp = Tmp::new("corr-fail-then-new");
+        grant_cloud(&tmp.0);
+        let mut db = Db::open(&Config::db_path(&tmp.0)).expect("db");
+        let ts = 1_700_000_432_000;
+        seed_worth(&mut db, ts);
+        add_closed_followup_chapter(&mut db, ts);
+        let first = db.chapters_for_range(ts, ts + 600_000).expect("segs")[0].core_started_at;
+        let sentinel = tmp.0.join("corr-retry");
+        let (command, args) = chaining_fake_cli(&tmp.0, &sentinel);
+        let brain = BrainConfig {
+            command,
+            args,
+            ..Default::default()
+        };
+        let mut engine = Engine::new(db, tmp.0.clone(), brain, ts).expect("engine");
+        engine
+            .step(ts + 601_000, Step::Activity)
+            .expect("first card");
+        engine
+            .db
+            .conn()
+            .execute(
+                "UPDATE l2_card SET created_at = ?1 WHERE segment_core_start = ?2",
+                [ts + 40_000, first],
+            )
+            .expect("backdate");
+        insert_later_frame(&mut engine.db, ts, 90_000, "FIRST_NEW", 12);
+        overwrite_cli_stdout(Path::new(&engine.brain.args[0]), "");
+        engine
+            .step(ts + 601_000, Step::Activity)
+            .expect("failed correction");
+        assert_eq!(engine.db.l2_versions_for_segment(first).unwrap().len(), 1);
+        let newer_fid = insert_later_frame(&mut engine.db, ts, 120_000, "SECOND_NEW", 13);
+        let json = format!(
+            r#"{{"segment_ref":"segment:{first}","activity":"CORRECTED_AFTER_NEW_EVIDENCE","entities":[],"confidence":0.7,"evidence_refs":["frame:{newer_fid}"],"open_questions":[]}}"#
+        );
+        overwrite_cli_stdout(Path::new(&engine.brain.args[0]), &json);
+        engine
+            .step(ts + 601_000, Step::Activity)
+            .expect("retry with newer evidence");
+        let versions = engine
+            .db
+            .l2_versions_for_segment(first)
+            .expect("versions after retry");
+        assert_eq!(versions.len(), 2, "真的更新的證據才可以再問：{versions:?}");
+        assert_eq!(
+            versions.last().expect("latest").activity,
+            "CORRECTED_AFTER_NEW_EVIDENCE"
+        );
     }
 }

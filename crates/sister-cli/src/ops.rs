@@ -1895,6 +1895,7 @@ pub mod interpret {
             after_core_start: None,
             only_core_start,
             existing_l2: brain::ExistingL2::Keep,
+            attempted_corrections: None,
         };
 
         if dry_run {

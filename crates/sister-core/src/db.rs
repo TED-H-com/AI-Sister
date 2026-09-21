@@ -3067,6 +3067,113 @@ impl Db {
         Ok(hits)
     }
 
+    /// 這段時間裡最新一筆可引用證據的時間。不受 OCR 摘錄筆數上限影響：
+    /// 新畫面若排在第 41 段，oldest-first 的摘錄會看不到它，但修正判斷不能跟著瞎。
+    pub fn max_citable_ts_in_range(
+        &self,
+        from_ts: Millis,
+        to_ts: Millis,
+    ) -> Result<Option<Millis>> {
+        if from_ts >= to_ts {
+            return Ok(None);
+        }
+        self.conn
+            .query_row(
+                "SELECT MAX(ts) FROM (
+                     SELECT ts FROM facts WHERE ts >= ?1 AND ts < ?2
+                     UNION ALL
+                     SELECT ts FROM text_chunks
+                      WHERE ts >= ?1 AND ts < ?2 AND frame_id IS NOT NULL
+                 )",
+                params![from_ts, to_ts],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    /// 解釋層要帶進 prompt 的 OCR。一般取最早的 `limit` 段；修正已有卡片時，
+    /// 先放 `after_ts` 之後的新證據（新的在後），再用更早的段把名額補滿。
+    pub fn chunks_in_range_preferring_after(
+        &self,
+        from_ts: Millis,
+        to_ts: Millis,
+        limit: usize,
+        after_ts: Option<Millis>,
+    ) -> Result<Vec<SearchHit>> {
+        let Some(after) = after_ts else {
+            return self.chunks_in_range(from_ts, to_ts, limit);
+        };
+        if from_ts >= to_ts || limit == 0 {
+            return Ok(Vec::new());
+        }
+        const OVERFETCH: usize = 12;
+        let fetch = (limit.saturating_mul(OVERFETCH).max(OVERFETCH)) as i64;
+        let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<SearchHit> {
+            let kind: String = row.get(2)?;
+            let text: String = row.get(7)?;
+            Ok(SearchHit {
+                chunk_id: row.get(0)?,
+                ts: row.get(1)?,
+                source_kind: SourceKind::from_str_kind(&kind).unwrap_or(SourceKind::Ocr),
+                frame_id: row.get(3)?,
+                app_id: row.get(4)?,
+                window_title: row.get(5)?,
+                url: row.get(6)?,
+                snippet: text.chars().take(60).collect(),
+                text,
+                score: 0.0,
+            })
+        };
+        let mut newer = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, ts, source_kind, frame_id, app_id, window_title, url, text
+                 FROM text_chunks
+                 WHERE ts >= ?1 AND ts < ?2 AND ts > ?3
+                 ORDER BY ts DESC, id DESC
+                 LIMIT ?4",
+            )?;
+            let rows = stmt.query_map(params![from_ts, to_ts, after, fetch], map_row)?;
+            let mut hits: Vec<SearchHit> = Vec::new();
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for hit in rows.flatten() {
+                if !seen.insert(hit.text.clone()) {
+                    continue;
+                }
+                hits.push(hit);
+                if hits.len() >= limit {
+                    break;
+                }
+            }
+            hits.reverse();
+            hits
+        };
+        if newer.len() >= limit {
+            return Ok(newer);
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT id, ts, source_kind, frame_id, app_id, window_title, url, text
+             FROM text_chunks
+             WHERE ts >= ?1 AND ts < ?2 AND ts <= ?3
+             ORDER BY ts ASC, id ASC
+             LIMIT ?4",
+        )?;
+        let rows = stmt.query_map(params![from_ts, to_ts, after, fetch], map_row)?;
+        let mut older: Vec<SearchHit> = Vec::new();
+        let mut seen: std::collections::HashSet<String> =
+            newer.iter().map(|hit| hit.text.clone()).collect();
+        for hit in rows.flatten() {
+            if !seen.insert(hit.text.clone()) {
+                continue;
+            }
+            older.push(hit);
+            if older.len() + newer.len() >= limit {
+                break;
+            }
+        }
+        older.append(&mut newer);
+        Ok(older)
+    }
+
     // ---------- 題庫 ----------
 
     /// 這個網址的**站**，在她自己的紀錄裡出現過嗎（PHASES #42）。

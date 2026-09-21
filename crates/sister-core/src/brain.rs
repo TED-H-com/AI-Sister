@@ -9,6 +9,7 @@
 //! 承諾表和 entities 要的正是「王小明」這三個字能對得起來。同意書 2 第 3 版
 //! 講的就是這件事，他按的是那句話。
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -1161,6 +1162,10 @@ pub struct PreparedJob {
     pub payload: String,
     /// 證據那一半有沒有被 `MAX_PROMPT_BYTES` 截掉。
     pub truncated: bool,
+    /// 圍欄裡實際列出、模型才准引用的 frame／fact。截斷後以圍欄內為準。
+    pub listed_evidence: Vec<EvidenceRef>,
+    /// 這一段（不受摘錄上限）最新可引用證據的時間；失敗的修正用它記住快照。
+    pub newest_citable_ts: Option<Millis>,
 }
 
 #[derive(Debug, Clone)]
@@ -1216,6 +1221,9 @@ pub struct InterpretInput<'a> {
     /// 指定某一段的 core_started_at。有的話跳過「值不值得」那一關。
     pub only_core_start: Option<Millis>,
     pub existing_l2: ExistingL2,
+    /// 這場已對某章做過修正、當時看到的最新可引用證據時間。
+    /// 同一快照失敗後不准每拍重試；更新的證據才可以再問。
+    pub attempted_corrections: Option<&'a BTreeMap<Millis, Millis>>,
 }
 
 pub fn prepare(input: &mut InterpretInput<'_>, data_dir: &Path) -> Result<DryRun> {
@@ -1473,6 +1481,13 @@ fn classify(
             }),
         ));
     }
+    if spawn.stdout.trim().is_empty() {
+        return Ok((
+            OutboundOutcome::NoAnswer,
+            None,
+            Some("CLI 正常結束，但沒有回答".into()),
+        ));
+    }
     match parse_card(&spawn.stdout, &job.segment_ref) {
         Ok(mut card) => {
             if let Some(continues) = &card.continues
@@ -1488,15 +1503,21 @@ fn classify(
                     )),
                 ));
             }
-            card.evidence_refs.retain(|r| match r {
-                EvidenceRef::Frame(id) => db.frame_exists(*id).unwrap_or(false),
-                EvidenceRef::Fact(id) => db.fact_exists(*id).unwrap_or(false),
+            card.evidence_refs.retain(|r| {
+                job.listed_evidence.contains(r)
+                    && match r {
+                        EvidenceRef::Frame(id) => db.frame_exists(*id).unwrap_or(false),
+                        EvidenceRef::Fact(id) => db.fact_exists(*id).unwrap_or(false),
+                    }
             });
             if card.evidence_refs.is_empty() {
                 return Ok((
                     OutboundOutcome::BadJson,
                     None,
-                    Some("evidence_refs 沒有任何一筆指得回本機的 frame／fact".into()),
+                    Some(
+                        "evidence_refs 沒有任何一筆是這次 prompt 列出且指得回本機的 frame／fact"
+                            .into(),
+                    ),
                 ));
             }
             Ok((OutboundOutcome::Success, Some(card), None))
@@ -1515,6 +1536,18 @@ fn record_skip(db: &mut Db, reason: SkipReason) -> Result<()> {
     Ok(())
 }
 
+fn scan_listed_refs(text: &str) -> Vec<EvidenceRef> {
+    let mut out = Vec::new();
+    for raw in text.split(|c: char| !(c.is_ascii_alphanumeric() || c == ':')) {
+        if let Some(r) = EvidenceRef::parse(raw)
+            && !out.contains(&r)
+        {
+            out.push(r);
+        }
+    }
+    out
+}
+
 fn collect_jobs(input: &mut InterpretInput<'_>) -> Result<Vec<PreparedJob>> {
     let segs = input.db.chapters_for_range(input.from_ts, input.to_ts)?;
     let stuck = input.db.stuck_in_range(input.from_ts, input.to_ts)?;
@@ -1528,33 +1561,10 @@ fn collect_jobs(input: &mut InterpretInput<'_>) -> Result<Vec<PreparedJob>> {
     // 後一張永遠看不到前一張剛形成的理解，`continues` 只剩猜字串。
     for seg in segs {
         if input
-            .after_core_start
-            .is_some_and(|after| seg.core_started_at <= after)
-        {
-            continue;
-        }
-        if input
             .only_core_start
             .is_some_and(|only| seg.core_started_at != only)
         {
             continue;
-        }
-        let mut refresh_existing = false;
-        if let Some(latest) = input
-            .db
-            .l2_versions_for_chapter(seg.core_started_at, seg.core_ended_at)?
-            .last()
-        {
-            match input.existing_l2 {
-                ExistingL2::Keep => continue,
-                ExistingL2::RefreshInterpreter
-                    if latest.author != crate::db::L2Author::Interpreter
-                        || latest.segment_core_start != seg.core_started_at =>
-                {
-                    continue;
-                }
-                ExistingL2::RefreshInterpreter => refresh_existing = true,
-            }
         }
         let facts = input
             .db
@@ -1566,21 +1576,79 @@ fn collect_jobs(input: &mut InterpretInput<'_>) -> Result<Vec<PreparedJob>> {
         let is_stuck = stuck
             .iter()
             .any(|s| s.started_at < seg.core_ended_at && s.ended_at > seg.core_started_at);
+        let latest = input
+            .db
+            .l2_versions_for_chapter(seg.core_started_at, seg.core_ended_at)?
+            .last()
+            .cloned();
+        let newest_citable_ts = input
+            .db
+            .max_citable_ts_in_range(seg.core_started_at, seg.core_ended_at)?;
+        let mut refresh_existing = false;
+        let mut correcting = false;
+        if let Some(latest) = &latest {
+            let same_core = latest.segment_core_start == seg.core_started_at;
+            let interpreter = latest.author == crate::db::L2Author::Interpreter;
+            match input.existing_l2 {
+                ExistingL2::Keep => {
+                    if !interpreter || !same_core {
+                        continue;
+                    }
+                    let Some(newest) = newest_citable_ts else {
+                        continue;
+                    };
+                    if newest <= latest.created_at {
+                        continue;
+                    }
+                    let already = input
+                        .attempted_corrections
+                        .and_then(|m| m.get(&seg.core_started_at))
+                        .copied();
+                    if already.is_some_and(|seen| newest <= seen) {
+                        continue;
+                    }
+                    correcting = true;
+                }
+                ExistingL2::RefreshInterpreter if !interpreter || !same_core => continue,
+                ExistingL2::RefreshInterpreter => refresh_existing = true,
+            }
+        }
+        if input
+            .after_core_start
+            .is_some_and(|after| seg.core_started_at <= after)
+            && !correcting
+        {
+            continue;
+        }
         if input.only_core_start.is_none()
             && !refresh_existing
+            && !correcting
             && !worth_interpreting(&seg, &facts, large_clip, is_stuck)
         {
             continue;
         }
-        let prev = input.db.latest_l2_before(seg.core_started_at)?;
-        let ocr =
-            input
-                .db
-                .chunks_in_range(seg.core_started_at, seg.core_ended_at, MAX_OCR_SNIPPETS)?;
+        if !refresh_existing && newest_citable_ts.is_none() {
+            continue;
+        }
+        let prefer_after = latest
+            .as_ref()
+            .and_then(|card| correcting.then_some(card.created_at));
+        let ocr = input.db.chunks_in_range_preferring_after(
+            seg.core_started_at,
+            seg.core_ended_at,
+            MAX_OCR_SNIPPETS,
+            prefer_after,
+        )?;
+        let prev = if correcting || refresh_existing {
+            latest
+        } else {
+            input.db.latest_l2_before(seg.core_started_at)?
+        };
         let (header, evidence) = build_prompt(&seg, &facts, &ocr, prev.as_ref());
         // 只截資料本體，然後才補上不可預測且完整的結束圍欄。說明與尾標都不能被截掉。
         let (evidence, truncated) =
             crate::prompt_fence::fence_untrusted_data(&evidence, MAX_PROMPT_BYTES)?;
+        let listed_evidence = scan_listed_refs(&evidence);
         jobs.push(PreparedJob {
             segment_ref: segment_ref(seg.core_started_at),
             previous_segment_ref: prev.as_ref().map(|card| card.segment_ref.clone()),
@@ -1590,6 +1658,8 @@ fn collect_jobs(input: &mut InterpretInput<'_>) -> Result<Vec<PreparedJob>> {
             title: seg.title.clone(),
             payload: format!("{header}{evidence}"),
             truncated,
+            listed_evidence,
+            newest_citable_ts,
         });
         if jobs.len() >= cap {
             break;
@@ -2606,6 +2676,7 @@ mod tests {
                 after_core_start: None,
                 only_core_start: Some(core),
                 existing_l2: ExistingL2::Keep,
+                attempted_corrections: None,
             },
             &dir,
         )
@@ -2900,6 +2971,56 @@ mod tests {
         fid
     }
 
+    /// `seed` 只關得住第一段。再切一次才有「後一段接著前一段的工作假設」。
+    fn close_second_chapter(db: &mut Db, ts: Millis) -> i64 {
+        use crate::model::{FocusEvent, FocusKind, FocusSnapshot, FrameCapture, OcrBlock};
+        let sid: i64 = db
+            .conn()
+            .query_row(
+                "SELECT id FROM sessions ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("session");
+        db.insert_focus(
+            sid,
+            &FocusEvent {
+                ts: ts + 360_000,
+                kind: FocusKind::Focus,
+                snapshot: FocusSnapshot {
+                    app_id: Some("notion.exe".into()),
+                    ..Default::default()
+                },
+            },
+        )
+        .expect("focus c");
+        let frame = FrameCapture {
+            assistive: Vec::new(),
+            ts: ts + 210_000,
+            monitor: 0,
+            width: 100,
+            height: 100,
+            dhash: 2,
+            image: None,
+            image_ext: "png",
+            ocr: vec![OcrBlock {
+                text: "error[E0425]: cannot find value SECOND_CHAPTER".into(),
+                x: 0,
+                y: 0,
+                w: 10,
+                h: 10,
+                confidence: 1.0,
+            }],
+            focus: FocusSnapshot {
+                app_id: Some("chrome.exe".into()),
+                ..Default::default()
+            },
+        };
+        db.insert_frame(sid, &frame, None, 0)
+            .expect("second frame")
+            .0
+    }
+
     #[test]
     fn collect_jobs_skips_a_merged_chapter_with_a_card_on_its_right_half() {
         use crate::model::{FocusEvent, FocusKind, FocusSnapshot};
@@ -2961,6 +3082,7 @@ mod tests {
             after_core_start: None,
             only_core_start: Some(left),
             existing_l2: ExistingL2::Keep,
+            attempted_corrections: None,
         })
         .expect("collect jobs");
         assert!(
@@ -2978,6 +3100,7 @@ mod tests {
             after_core_start: None,
             only_core_start: Some(left),
             existing_l2: ExistingL2::RefreshInterpreter,
+            attempted_corrections: None,
         })
         .expect("collect refresh jobs");
         assert!(
@@ -3024,6 +3147,7 @@ mod tests {
                 after_core_start: None,
                 only_core_start: Some(core),
                 existing_l2: ExistingL2::RefreshInterpreter,
+                attempted_corrections: None,
             })
             .expect("collect")
         };
@@ -3110,6 +3234,7 @@ mod tests {
             after_core_start: None,
             only_core_start: None,
             existing_l2: ExistingL2::Keep,
+            attempted_corrections: None,
         })
         .expect("first job");
         assert_eq!(first_job.len(), 1);
@@ -3129,6 +3254,7 @@ mod tests {
             after_core_start: Some(first),
             only_core_start: None,
             existing_l2: ExistingL2::Keep,
+            attempted_corrections: None,
         })
         .expect("job after failed first");
         assert_eq!(after_failed_first.len(), 1);
@@ -3162,6 +3288,7 @@ mod tests {
             after_core_start: None,
             only_core_start: None,
             existing_l2: ExistingL2::Keep,
+            attempted_corrections: None,
         })
         .expect("second job");
         assert_eq!(second_job.len(), 1);
@@ -3173,6 +3300,434 @@ mod tests {
         assert!(
             second_job[0].payload.contains("WORKING_HYPOTHESIS_MARK"),
             "後一段必須讀到前一段剛落地的工作假說"
+        );
+    }
+
+    #[test]
+    fn collect_jobs_skips_a_worth_cut_that_has_nothing_to_cite() {
+        use crate::model::{FocusEvent, FocusKind, FocusSnapshot};
+
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_000_080_000;
+        let sid = db.start_session("test", "0").expect("session");
+        for (offset, app) in [(0, "code.exe"), (180_000, "chrome.exe")] {
+            db.insert_focus(
+                sid,
+                &FocusEvent {
+                    ts: ts + offset,
+                    kind: FocusKind::Focus,
+                    snapshot: FocusSnapshot {
+                        app_id: Some(app.into()),
+                        ..Default::default()
+                    },
+                },
+            )
+            .expect("focus");
+        }
+        let consent = Consent::default();
+        let brain = crate::config::BrainConfig::default();
+        let jobs = collect_jobs(&mut InterpretInput {
+            db: &mut db,
+            consent: &consent,
+            brain: &brain,
+            from_ts: ts,
+            to_ts: ts + 400_000,
+            limit: 4,
+            after_core_start: None,
+            only_core_start: None,
+            existing_l2: ExistingL2::Keep,
+            attempted_corrections: None,
+        })
+        .expect("collect");
+        assert!(
+            jobs.is_empty(),
+            "只有換 app、沒有 frame／fact 可引用時，空轉呼叫會得到必然被拒的卡片：{jobs:?}"
+        );
+    }
+
+    #[test]
+    fn collect_jobs_reinterprets_an_interpreter_card_when_later_evidence_arrives() {
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_000_081_000;
+        let first_fid = seed(&mut db, ts);
+        let chapters = db.chapters_for_range(ts, ts + 400_000).expect("chapters");
+        let first = chapters[0].core_started_at;
+        db.insert_l2_card(&crate::db::L2Insert {
+            segment_core_start: first,
+            segment_ref: &segment_ref(first),
+            activity: "OLD_GUESS",
+            entities_json: "[]".into(),
+            continues_json: None,
+            commitments_json: "[]".into(),
+            model_confidence: 0.4,
+            evidence_json: format!(r#"["frame:{first_fid}"]"#),
+            open_questions_json: "[]".into(),
+            author: crate::db::L2Author::Interpreter,
+        })
+        .expect("old card");
+        db.conn()
+            .execute(
+                "UPDATE l2_card SET created_at = ?1 WHERE segment_core_start = ?2",
+                [ts + 40_000, first],
+            )
+            .expect("backdate so later evidence is actually later");
+        let consent = Consent::default();
+        let brain = crate::config::BrainConfig::default();
+        let unchanged = collect_jobs(&mut InterpretInput {
+            db: &mut db,
+            consent: &consent,
+            brain: &brain,
+            from_ts: ts,
+            to_ts: ts + 400_000,
+            limit: 1,
+            after_core_start: Some(first),
+            only_core_start: None,
+            existing_l2: ExistingL2::Keep,
+            attempted_corrections: None,
+        })
+        .expect("no new evidence");
+        assert!(
+            unchanged.is_empty(),
+            "沒有新證據時，已通過的段即使 cursor 還在也不該空轉：{unchanged:?}"
+        );
+
+        let sid: i64 = db
+            .conn()
+            .query_row(
+                "SELECT id FROM sessions ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("session");
+        let later = crate::model::FrameCapture {
+            assistive: Vec::new(),
+            ts: ts + 90_000,
+            monitor: 0,
+            width: 100,
+            height: 100,
+            dhash: 9,
+            image: None,
+            image_ext: "png",
+            ocr: vec![crate::model::OcrBlock {
+                text: "error[E0425]: cannot find value NEW_EVIDENCE_MARK".into(),
+                x: 0,
+                y: 0,
+                w: 10,
+                h: 10,
+                confidence: 1.0,
+            }],
+            focus: crate::model::FocusSnapshot {
+                app_id: Some("code.exe".into()),
+                ..Default::default()
+            },
+        };
+        let (later_fid, _, _) = db.insert_frame(sid, &later, None, 0).expect("later frame");
+        let jobs = collect_jobs(&mut InterpretInput {
+            db: &mut db,
+            consent: &consent,
+            brain: &brain,
+            from_ts: ts,
+            to_ts: ts + 400_000,
+            limit: 1,
+            after_core_start: Some(first),
+            only_core_start: None,
+            existing_l2: ExistingL2::Keep,
+            attempted_corrections: None,
+        })
+        .expect("new evidence");
+        assert_eq!(jobs.len(), 1, "同章新證據必須再問一次：{jobs:?}");
+        assert_eq!(jobs[0].core_started_at, first);
+        assert_eq!(
+            jobs[0].previous_segment_ref.as_deref(),
+            Some(segment_ref(first).as_str()),
+            "修正時給它看的是這張正要改的工作假設"
+        );
+        assert!(
+            jobs[0].payload.contains("OLD_GUESS"),
+            "修正必須看到原假設：{}",
+            jobs[0].payload
+        );
+        assert!(
+            jobs[0].payload.contains(&format!("frame:{later_fid}"))
+                && jobs[0].payload.contains("NEW_EVIDENCE_MARK"),
+            "修正必須看到後來的證據：{}",
+            jobs[0].payload
+        );
+    }
+
+    #[test]
+    fn collect_jobs_still_sees_new_ocr_past_the_oldest_snippet_cap() {
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_000_083_000;
+        let first_fid = seed(&mut db, ts);
+        let chapters = db.chapters_for_range(ts, ts + 400_000).expect("chapters");
+        let first = chapters[0].core_started_at;
+        let sid: i64 = db
+            .conn()
+            .query_row(
+                "SELECT id FROM sessions ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("session");
+        for i in 0..MAX_OCR_SNIPPETS {
+            let filler = crate::model::FrameCapture {
+                assistive: Vec::new(),
+                ts: ts + 31_000 + i as i64 * 20,
+                monitor: 0,
+                width: 100,
+                height: 100,
+                dhash: 20 + i as u64,
+                image: None,
+                image_ext: "png",
+                ocr: vec![crate::model::OcrBlock {
+                    text: format!("filler line {i} error[E0308]"),
+                    x: 0,
+                    y: 0,
+                    w: 10,
+                    h: 10,
+                    confidence: 1.0,
+                }],
+                focus: crate::model::FocusSnapshot {
+                    app_id: Some("code.exe".into()),
+                    ..Default::default()
+                },
+            };
+            db.insert_frame(sid, &filler, None, 0).expect("filler");
+        }
+        db.insert_l2_card(&crate::db::L2Insert {
+            segment_core_start: first,
+            segment_ref: &segment_ref(first),
+            activity: "OLD_CAP_GUESS",
+            entities_json: "[]".into(),
+            continues_json: None,
+            commitments_json: "[]".into(),
+            model_confidence: 0.4,
+            evidence_json: format!(r#"["frame:{first_fid}"]"#),
+            open_questions_json: "[]".into(),
+            author: crate::db::L2Author::Interpreter,
+        })
+        .expect("old card");
+        db.conn()
+            .execute(
+                "UPDATE l2_card SET created_at = ?1 WHERE segment_core_start = ?2",
+                [ts + 40_000, first],
+            )
+            .expect("backdate");
+        let late = crate::model::FrameCapture {
+            assistive: Vec::new(),
+            ts: ts + 90_000,
+            monitor: 0,
+            width: 100,
+            height: 100,
+            dhash: 99,
+            image: None,
+            image_ext: "png",
+            ocr: vec![crate::model::OcrBlock {
+                text: "error[E0425]: LATE_OCR_PAST_CAP".into(),
+                x: 0,
+                y: 0,
+                w: 10,
+                h: 10,
+                confidence: 1.0,
+            }],
+            focus: crate::model::FocusSnapshot {
+                app_id: Some("code.exe".into()),
+                ..Default::default()
+            },
+        };
+        let (late_fid, _, _) = db.insert_frame(sid, &late, None, 0).expect("late");
+        let oldest_only = db
+            .chunks_in_range(first, chapters[0].core_ended_at, MAX_OCR_SNIPPETS)
+            .expect("oldest");
+        assert!(
+            oldest_only
+                .iter()
+                .all(|hit| !hit.text.contains("LATE_OCR_PAST_CAP")),
+            "前提：oldest-first 摘錄看不到第 41 段新證據"
+        );
+        let jobs = collect_jobs(&mut InterpretInput {
+            db: &mut db,
+            consent: &Consent::default(),
+            brain: &crate::config::BrainConfig::default(),
+            from_ts: ts,
+            to_ts: ts + 400_000,
+            limit: 1,
+            after_core_start: Some(first),
+            only_core_start: None,
+            existing_l2: ExistingL2::Keep,
+            attempted_corrections: None,
+        })
+        .expect("collect");
+        assert_eq!(jobs.len(), 1, "新證據在摘錄上限之後仍要修正：{jobs:?}");
+        assert!(
+            jobs[0].payload.contains("LATE_OCR_PAST_CAP")
+                && jobs[0].payload.contains(&format!("frame:{late_fid}")),
+            "修正 prompt 必須帶上那筆新 OCR：{}",
+            jobs[0].payload
+        );
+        assert!(
+            jobs[0]
+                .listed_evidence
+                .contains(&EvidenceRef::Frame(late_fid)),
+            "列出的引用必須含新畫面：{:?}",
+            jobs[0].listed_evidence
+        );
+    }
+
+    #[test]
+    fn collect_jobs_does_not_retry_the_same_failed_correction_snapshot() {
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_000_084_000;
+        let first_fid = seed(&mut db, ts);
+        close_second_chapter(&mut db, ts);
+        let chapters = db.chapters_for_range(ts, ts + 400_000).expect("chapters");
+        assert!(chapters.len() >= 2, "要有前後兩段：{chapters:?}");
+        let first = chapters[0].core_started_at;
+        let second = chapters[1].core_started_at;
+        db.insert_l2_card(&crate::db::L2Insert {
+            segment_core_start: first,
+            segment_ref: &segment_ref(first),
+            activity: "OLD_GUESS",
+            entities_json: "[]".into(),
+            continues_json: None,
+            commitments_json: "[]".into(),
+            model_confidence: 0.4,
+            evidence_json: format!(r#"["frame:{first_fid}"]"#),
+            open_questions_json: "[]".into(),
+            author: crate::db::L2Author::Interpreter,
+        })
+        .expect("old card");
+        db.conn()
+            .execute(
+                "UPDATE l2_card SET created_at = ?1 WHERE segment_core_start = ?2",
+                [ts + 40_000, first],
+            )
+            .expect("backdate");
+        let sid: i64 = db
+            .conn()
+            .query_row(
+                "SELECT id FROM sessions ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("session");
+        let later = crate::model::FrameCapture {
+            assistive: Vec::new(),
+            ts: ts + 90_000,
+            monitor: 0,
+            width: 100,
+            height: 100,
+            dhash: 9,
+            image: None,
+            image_ext: "png",
+            ocr: vec![crate::model::OcrBlock {
+                text: "error[E0425]: SNAPSHOT_MARK".into(),
+                x: 0,
+                y: 0,
+                w: 10,
+                h: 10,
+                confidence: 1.0,
+            }],
+            focus: crate::model::FocusSnapshot {
+                app_id: Some("code.exe".into()),
+                ..Default::default()
+            },
+        };
+        db.insert_frame(sid, &later, None, 0).expect("later");
+        let newest = db
+            .max_citable_ts_in_range(first, chapters[0].core_ended_at)
+            .expect("newest")
+            .expect("has evidence");
+        let mut tried = std::collections::BTreeMap::new();
+        tried.insert(first, newest);
+        let jobs = collect_jobs(&mut InterpretInput {
+            db: &mut db,
+            consent: &Consent::default(),
+            brain: &crate::config::BrainConfig::default(),
+            from_ts: ts,
+            to_ts: ts + 400_000,
+            limit: 1,
+            after_core_start: Some(first),
+            only_core_start: None,
+            existing_l2: ExistingL2::Keep,
+            attempted_corrections: Some(&tried),
+        })
+        .expect("collect");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(
+            jobs[0].core_started_at, second,
+            "同一快照失敗後要往後走，不能再卡在第一段：{:?}",
+            jobs[0].core_started_at
+        );
+    }
+
+    #[test]
+    fn collect_jobs_shows_a_user_correction_as_the_next_working_hypothesis() {
+        let mut db = Db::open_in_memory().expect("db");
+        let ts = 1_700_000_082_000;
+        let fid = seed(&mut db, ts);
+        close_second_chapter(&mut db, ts);
+        let chapters = db.chapters_for_range(ts, ts + 400_000).expect("chapters");
+        assert!(chapters.len() >= 2, "要有前後兩段：{chapters:?}");
+        let first = chapters[0].core_started_at;
+        let second = chapters[1].core_started_at;
+        db.insert_l2_card(&crate::db::L2Insert {
+            segment_core_start: first,
+            segment_ref: &segment_ref(first),
+            activity: "MACHINE_GUESS",
+            entities_json: "[]".into(),
+            continues_json: None,
+            commitments_json: "[]".into(),
+            model_confidence: 0.4,
+            evidence_json: format!(r#"["frame:{fid}"]"#),
+            open_questions_json: "[]".into(),
+            author: crate::db::L2Author::Interpreter,
+        })
+        .expect("machine card");
+        db.insert_l2_card(&crate::db::L2Insert {
+            segment_core_start: first,
+            segment_ref: &segment_ref(first),
+            activity: "USER_CORRECTION_MARK",
+            entities_json: "[]".into(),
+            continues_json: None,
+            commitments_json: "[]".into(),
+            model_confidence: 1.0,
+            evidence_json: format!(r#"["frame:{fid}"]"#),
+            open_questions_json: "[]".into(),
+            author: crate::db::L2Author::User,
+        })
+        .expect("user card");
+        let consent = Consent::default();
+        let brain = crate::config::BrainConfig::default();
+        let jobs = collect_jobs(&mut InterpretInput {
+            db: &mut db,
+            consent: &consent,
+            brain: &brain,
+            from_ts: ts,
+            to_ts: ts + 400_000,
+            limit: 1,
+            after_core_start: None,
+            only_core_start: None,
+            existing_l2: ExistingL2::Keep,
+            attempted_corrections: None,
+        })
+        .expect("next job");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].core_started_at, second);
+        assert_eq!(
+            jobs[0].previous_segment_ref.as_deref(),
+            Some(segment_ref(first).as_str())
+        );
+        assert!(
+            jobs[0].payload.contains("USER_CORRECTION_MARK"),
+            "後一段必須接著使用者更正，不能回去用機器那版：{}",
+            jobs[0].payload
+        );
+        assert!(
+            !jobs[0].payload.contains("MACHINE_GUESS"),
+            "使用者更正之後不該再把被取代的機器假設當現況：{}",
+            jobs[0].payload
         );
     }
 
@@ -3189,6 +3744,8 @@ mod tests {
             title: None,
             payload: String::new(),
             truncated: false,
+            listed_evidence: vec![EvidenceRef::Frame(fid)],
+            newest_citable_ts: None,
         };
         let spawn = SpawnOutcome {
             payload_chars_written: 1,
@@ -3210,6 +3767,118 @@ mod tests {
                 .as_deref()
                 .is_some_and(|text| text.contains("segment:999") && text.contains("segment:100")),
             "應該同時說出模型指的與實際給的上一張：{error:?}"
+        );
+    }
+
+    fn blank_spawn(stdout: &str) -> SpawnOutcome {
+        SpawnOutcome {
+            payload_chars_written: 1,
+            duration_ms: 1,
+            stdout: stdout.into(),
+            stderr: String::new(),
+            timed_out: false,
+            spawn_error: None,
+            exit_code: Some(0),
+            process_start: ProcessStart::Started,
+        }
+    }
+
+    #[test]
+    fn classify_empty_stdout_is_no_answer_not_bad_json() {
+        let mut db = Db::open_in_memory().expect("db");
+        let _fid = seed(&mut db, 1_700_000_071_000);
+        let job = PreparedJob {
+            segment_ref: "segment:200".into(),
+            previous_segment_ref: None,
+            core_started_at: 200,
+            core_ended_at: 300,
+            app: None,
+            title: None,
+            payload: String::new(),
+            truncated: false,
+            listed_evidence: Vec::new(),
+            newest_citable_ts: None,
+        };
+        let empty_error = classify(&job, &blank_spawn(""), &db)
+            .expect("empty")
+            .2
+            .expect("empty reason");
+        let whitespace_error = classify(&job, &blank_spawn("  \n\t"), &db)
+            .expect("whitespace")
+            .2
+            .expect("whitespace reason");
+        let nonzero = classify(
+            &job,
+            &SpawnOutcome {
+                payload_chars_written: 1,
+                duration_ms: 1,
+                stdout: String::new(),
+                stderr: String::new(),
+                timed_out: false,
+                spawn_error: None,
+                exit_code: Some(7),
+                process_start: ProcessStart::Started,
+            },
+            &db,
+        )
+        .expect("nonzero")
+        .2
+        .expect("nonzero reason");
+        for stdout in ["", "  \n\t"] {
+            let (outcome, card, error) =
+                classify(&job, &blank_spawn(stdout), &db).expect("classify");
+            assert_eq!(
+                outcome,
+                OutboundOutcome::NoAnswer,
+                "空 stdout 不可以冒充 JSON 壞掉：{error:?}"
+            );
+            assert!(card.is_none());
+        }
+        assert_eq!(empty_error, "CLI 正常結束，但沒有回答");
+        assert_eq!(whitespace_error, empty_error);
+        assert_ne!(
+            empty_error, nonzero,
+            "沒印字和退出碼 7 印成同一句：{empty_error}"
+        );
+        assert!(nonzero.contains("退出碼 7"), "{nonzero}");
+    }
+
+    #[test]
+    fn classify_rejects_a_frame_that_exists_but_was_not_listed_in_the_prompt() {
+        let mut db = Db::open_in_memory().expect("db");
+        let fid = seed(&mut db, 1_700_000_072_000);
+        let job = PreparedJob {
+            segment_ref: "segment:200".into(),
+            previous_segment_ref: None,
+            core_started_at: 200,
+            core_ended_at: 300,
+            app: None,
+            title: None,
+            payload: String::new(),
+            truncated: false,
+            listed_evidence: vec![EvidenceRef::Fact(1)],
+            newest_citable_ts: None,
+        };
+        let spawn = SpawnOutcome {
+            payload_chars_written: 1,
+            duration_ms: 1,
+            stdout: format!(
+                r#"{{"segment_ref":"segment:200","activity":"x","entities":[],"confidence":0.7,"evidence_refs":["frame:{fid}"],"open_questions":[]}}"#
+            ),
+            stderr: String::new(),
+            timed_out: false,
+            spawn_error: None,
+            exit_code: Some(0),
+            process_start: ProcessStart::Started,
+        };
+        let (outcome, card, error) = classify(&job, &spawn, &db).expect("classify");
+        assert_eq!(outcome, OutboundOutcome::BadJson);
+        assert!(card.is_none());
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|text| text.contains("prompt 列出")),
+            "{error:?}"
         );
     }
 
@@ -3270,6 +3939,7 @@ mod tests {
             after_core_start: None,
             only_core_start: None,
             existing_l2: ExistingL2::Keep,
+            attempted_corrections: None,
         };
         let result = run_for_test(&mut input).expect("run");
         assert!(matches!(result.skip, Some(SkipReason::NoConsent)));
@@ -3330,6 +4000,7 @@ mod tests {
             after_core_start: None,
             only_core_start: Some(core),
             existing_l2: ExistingL2::Keep,
+            attempted_corrections: None,
         };
         let result = run_for_test(&mut input).expect("run");
         assert!(result.skip.is_none(), "{:?}", result.skip);
@@ -3394,6 +4065,7 @@ mod tests {
             after_core_start: None,
             only_core_start: Some(core),
             existing_l2: ExistingL2::Keep,
+            attempted_corrections: None,
         })
         .expect("run");
 
@@ -3425,6 +4097,7 @@ mod tests {
             after_core_start: None,
             only_core_start: Some(core),
             existing_l2: ExistingL2::Keep,
+            attempted_corrections: None,
         })
         .expect("second run");
         assert_eq!(second.ran.len(), 1);
@@ -3460,6 +4133,7 @@ mod tests {
             after_core_start: None,
             only_core_start: Some(core),
             existing_l2: ExistingL2::Keep,
+            attempted_corrections: None,
         })
         .expect("run");
         assert_eq!(result.ran.len(), 1);
@@ -3503,6 +4177,7 @@ mod tests {
             after_core_start: None,
             only_core_start: None,
             existing_l2: ExistingL2::Keep,
+            attempted_corrections: None,
         };
         let stop_command = format!("sister --data-dir {} stop-all --off", dir.display());
         let before = format_dry_run_with_commands(
@@ -3553,6 +4228,7 @@ mod tests {
             after_core_start: None,
             only_core_start: None,
             existing_l2: ExistingL2::Keep,
+            attempted_corrections: None,
         };
         let report = prepare(&mut input, test_unstopped_data_dir()).expect("prepare");
         let text = format_dry_run(&report);

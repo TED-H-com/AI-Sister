@@ -1673,6 +1673,30 @@ fn unanswered_cli_error(exit_code: Option<i32>) -> String {
     }
 }
 
+fn spawn_outbound_result(spawn: &SpawnOutcome) -> (OutboundOutcome, Option<String>) {
+    if !spawn.completed_the_ask() {
+        if spawn.timed_out {
+            (OutboundOutcome::Timeout, Some(PASS_TIMED_OUT.into()))
+        } else if spawn.spawn_error.is_none() {
+            (
+                OutboundOutcome::NoAnswer,
+                Some(unanswered_cli_error(spawn.exit_code)),
+            )
+        } else {
+            (OutboundOutcome::SpawnFailed, spawn.spawn_error.clone())
+        }
+    } else if spawn.stdout.trim().is_empty() {
+        (
+            OutboundOutcome::NoAnswer,
+            Some("CLI 正常結束，但沒有回答".into()),
+        )
+    } else if parse_pass(&spawn.stdout).is_none() {
+        (OutboundOutcome::BadJson, Some("JSON 不能用".into()))
+    } else {
+        (OutboundOutcome::Success, None)
+    }
+}
+
 /// **這裡刻意收不到 payload。**
 ///
 /// `chars_sent` 要記的是「真的離開這台機器的字數」，而那件事只有
@@ -1691,22 +1715,7 @@ fn log_outbound(
     card: &L2CardRow,
     spawn: &SpawnOutcome,
 ) -> Result<()> {
-    let (outcome, error) = if !spawn.completed_the_ask() {
-        if spawn.timed_out {
-            (OutboundOutcome::Timeout, Some(PASS_TIMED_OUT.into()))
-        } else if spawn.spawn_error.is_none() {
-            (
-                OutboundOutcome::NoAnswer,
-                Some(unanswered_cli_error(spawn.exit_code)),
-            )
-        } else {
-            (OutboundOutcome::SpawnFailed, spawn.spawn_error.clone())
-        }
-    } else if parse_pass(&spawn.stdout).is_none() {
-        (OutboundOutcome::BadJson, Some("JSON 不能用".into()))
-    } else {
-        (OutboundOutcome::Success, None)
-    };
+    let (outcome, error) = spawn_outbound_result(spawn);
     db.insert_brain_outbound(&OutboundInsert {
         ts: crate::now_ms(),
         day_key: day,
@@ -6040,6 +6049,38 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn empty_stdout_with_zero_exit_is_no_answer_not_unreadable_json() {
+        let started = |stdout: &str, code: i32| SpawnOutcome {
+            payload_chars_written: 1,
+            duration_ms: 1,
+            stdout: stdout.into(),
+            stderr: String::new(),
+            timed_out: false,
+            spawn_error: None,
+            exit_code: Some(code),
+            process_start: ProcessStart::Started,
+        };
+        let empty = spawn_outbound_result(&started("", 0));
+        let whitespace = spawn_outbound_result(&started(" \n", 0));
+        let garbage = spawn_outbound_result(&started("not a card", 0));
+        let nonzero = spawn_outbound_result(&started("", 7));
+        assert_eq!(empty.0, OutboundOutcome::NoAnswer);
+        assert_eq!(whitespace.0, OutboundOutcome::NoAnswer);
+        assert_eq!(garbage.0, OutboundOutcome::BadJson);
+        assert_eq!(nonzero.0, OutboundOutcome::NoAnswer);
+        assert_eq!(empty.1.as_deref(), Some("CLI 正常結束，但沒有回答"));
+        assert_eq!(empty.1, whitespace.1);
+        assert_ne!(empty.1, garbage.1, "沒印字和印了讀不懂的字是兩種結局");
+        assert_ne!(empty.1, nonzero.1, "沒印字和退出碼 7 印成同一句");
+        assert!(
+            nonzero.1.as_deref().is_some_and(|s| s.contains('7')),
+            "{:?}",
+            nonzero.1
+        );
+    }
+
     fn run_diverge(db: &mut Db, command: String, args: Vec<String>, ts: Millis) -> ReviewResult {
         let consent = signed();
         let brain = BrainConfig {
