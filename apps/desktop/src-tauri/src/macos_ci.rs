@@ -105,17 +105,25 @@ impl Drop for ChildGuard {
 }
 
 pub fn requested_directory() -> Result<Option<PathBuf>, String> {
+    requested_directory_from(std::env::args_os().skip(1))
+}
+
+fn requested_directory_from<I, A>(args: I) -> Result<Option<PathBuf>, String>
+where
+    I: IntoIterator<Item = A>,
+    A: AsRef<std::ffi::OsStr>,
+{
     let mut found = None;
-    let mut args = std::env::args_os().skip(1);
+    let mut args = args.into_iter();
     while let Some(argument) = args.next() {
-        if argument == ARGUMENT {
+        if argument.as_ref() == std::ffi::OsStr::new(ARGUMENT) {
             if found.is_some() {
                 return Err(format!("{ARGUMENT} appeared more than once"));
             }
             let directory = args
                 .next()
                 .ok_or_else(|| format!("{ARGUMENT} needs a probe directory"))?;
-            found = Some(PathBuf::from(directory));
+            found = Some(PathBuf::from(directory.as_ref()));
         }
     }
     Ok(found)
@@ -245,4 +253,57 @@ fn write_new_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
         .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
     file.sync_all()
         .map_err(|error| format!("cannot sync {}: {error}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+
+    #[test]
+    fn probe_argument_is_absent_by_default() {
+        assert_eq!(requested_directory_from(["--help"]).unwrap(), None);
+    }
+
+    #[test]
+    fn probe_argument_requires_a_directory() {
+        let error = requested_directory_from([ARGUMENT]).unwrap_err();
+        assert!(error.contains("needs a probe directory"), "{error}");
+    }
+
+    #[test]
+    fn probe_argument_rejects_duplicates() {
+        let error = requested_directory_from([ARGUMENT, "/tmp/a", ARGUMENT, "/tmp/b"]).unwrap_err();
+        assert!(error.contains("more than once"), "{error}");
+    }
+
+    #[test]
+    fn probe_argument_returns_the_directory() {
+        let path = requested_directory_from([ARGUMENT, "/tmp/macos-probe"]).unwrap();
+        assert_eq!(path.as_deref(), Some(Path::new("/tmp/macos-probe")));
+    }
+
+    #[test]
+    fn child_guard_kills_and_reaps_an_unfinished_child() {
+        let child = Command::new("/bin/sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        {
+            let _guard = ChildGuard::new(child);
+        }
+        let still_alive = Command::new("/bin/kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .expect("kill -0")
+            .success();
+        assert!(
+            !still_alive,
+            "capture child PID {pid} was still alive after ChildGuard drop"
+        );
+    }
 }

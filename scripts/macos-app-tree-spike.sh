@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # macOS ARM64 diagnostic: verify the .app/sibling process tree, then read the recorder's
-# permission facts. When TCC grants access, it also runs the exact ScreenCaptureKit RGBA path.
+# permission facts. Always runs Vision on the bundled zh self-test image, an in-memory
+# fact query of that text, and a stop-latch round-trip. When TCC grants access, it also
+# runs the exact ScreenCaptureKit RGBA path and Vision block-count OCR of that frame.
+# Captured-screen text is never written. This is still not a Public Preview.
 
 set -euo pipefail
 
@@ -337,13 +340,28 @@ report = json.loads(capture_path.read_text(encoding="utf-8"))
 app_exit = json.loads(exit_path.read_text(encoding="utf-8"))
 if app_exit != {"schema": 1, "success": True, "code": 0}:
     raise SystemExit(f"app did not report one clean child exit: {app_exit!r}")
-if report.get("schema") != 2:
+if report.get("schema") != 3:
     raise SystemExit(f"capture report schema mismatch: {report!r}")
 screen = report.get("screen_recording")
 accessibility = report.get("accessibility")
 capture = report.get("capture")
+captured_ocr = report.get("captured_ocr")
+self_test = report.get("vision_self_test")
+local_query = report.get("local_query")
+stop = report.get("stop")
+focus = report.get("focus")
 if not isinstance(capture, dict):
     raise SystemExit(f"capture outcome is not an object: {capture!r}")
+if not isinstance(captured_ocr, dict):
+    raise SystemExit(f"captured OCR outcome is not an object: {captured_ocr!r}")
+if not isinstance(self_test, dict):
+    raise SystemExit(f"vision self-test is not an object: {self_test!r}")
+if not isinstance(local_query, dict):
+    raise SystemExit(f"local query is not an object: {local_query!r}")
+if not isinstance(stop, dict):
+    raise SystemExit(f"stop outcome is not an object: {stop!r}")
+if not isinstance(focus, dict):
+    raise SystemExit(f"focus outcome is not an object: {focus!r}")
 outcome = capture.get("outcome")
 if accessibility not in {"granted", "not_granted_or_undetermined"}:
     raise SystemExit(f"unknown Accessibility result: {accessibility!r}")
@@ -362,23 +380,70 @@ if outcome == "captured":
         raise SystemExit(f"captured dimensions are not positive: {width!r}x{height!r}")
     if rgba_bytes != width * height * 4:
         raise SystemExit(f"captured RGBA byte count is wrong: {rgba_bytes!r}")
+    if captured_ocr.get("outcome") == "not_attempted":
+        raise SystemExit("captured RGBA frame was not sent through Vision OCR")
 elif outcome in {"not_attempted", "no_display", "failed"}:
-    pass
+    if captured_ocr.get("outcome") != "not_attempted":
+        raise SystemExit("Vision OCR of a capture ran without a captured frame")
 else:
     raise SystemExit(f"unknown capture outcome: {outcome!r}")
+
+for leaked in ("text", "lines", "blocks"):
+    if leaked in captured_ocr:
+        raise SystemExit(f"captured OCR JSON carried screen text field {leaked!r}")
+
+if self_test.get("outcome") != "recognized":
+    raise SystemExit(f"Vision self-test did not run: {self_test!r}")
+if self_test.get("source") != "bundled_ocr_selftest_zh_png":
+    raise SystemExit(f"Vision self-test used an unexpected source: {self_test!r}")
+if self_test.get("missing_expects"):
+    raise SystemExit(f"Vision self-test missed expected strings: {self_test!r}")
+if not isinstance(self_test.get("block_count"), int) or self_test["block_count"] <= 0:
+    raise SystemExit(f"Vision self-test block_count is not a positive count: {self_test!r}")
+
+if local_query.get("outcome") != "completed":
+    raise SystemExit(f"local query did not run: {local_query!r}")
+if local_query.get("source") != "bundled_self_test_ocr":
+    raise SystemExit(f"local query used an unexpected source: {local_query!r}")
+if local_query.get("expected_phone_found") is not True:
+    raise SystemExit(f"local query did not find the bundled 0800 phone: {local_query!r}")
+if local_query.get("expected_money_found") is not True:
+    raise SystemExit(f"local query did not find the bundled NT$13,450: {local_query!r}")
+
+if stop != {"outcome": "completed", "requested_reason": "requested", "consumed_reason": "requested"}:
+    raise SystemExit(f"stop latch round-trip did not complete: {stop!r}")
+
+if focus.get("outcome") not in {"not_attempted", "known", "unknown"}:
+    raise SystemExit(f"unknown focus outcome: {focus!r}")
+if accessibility == "not_granted_or_undetermined" and focus.get("outcome") != "not_attempted":
+    raise SystemExit("AX was not granted, but focus was still walked")
+if accessibility == "granted" and focus.get("outcome") == "not_attempted":
+    raise SystemExit("AX was granted, but focus was not observed")
 
 with summary_path.open("a", encoding="utf-8") as summary:
     summary.write("## macOS ARM64 app-tree capture diagnostic\n\n")
     summary.write(f"- Screen Recording: `{screen}`\n")
     summary.write(f"- Accessibility: `{accessibility}`\n")
     summary.write(f"- ScreenCaptureKit outcome: `{outcome}`\n")
+    summary.write(f"- Captured-frame Vision OCR: `{captured_ocr.get('outcome')}`\n")
+    summary.write(f"- Bundled Vision self-test: `{self_test.get('outcome')}` / `{self_test.get('block_count')}` blocks\n")
+    summary.write(
+        f"- Local query of bundled OCR: phone=`{local_query.get('expected_phone_found')}` "
+        f"money=`{local_query.get('expected_money_found')}`\n"
+    )
+    summary.write(f"- Stop latch: `{stop.get('outcome')}`\n")
+    summary.write(f"- AX focus (no titles in JSON): `{focus.get('outcome')}`\n")
     if outcome == "captured":
         summary.write(
             f"- Returned RGBA frame: `{capture['width']}×{capture['height']}` / "
             f"`{capture['rgba_bytes']}` bytes\n"
         )
+        summary.write(
+            "This is still not a Public Preview: no Developer ID notarization, "
+            "and hosted TCC for the bundled child is usually still denied.\n"
+        )
 if outcome != "captured":
-    print(f"::warning::macOS app-tree diagnostic produced {outcome}")
+    print(f"::warning::macOS app-tree diagnostic produced capture {outcome}; Vision self-test/query/stop still required")
 PY
 
 if find "$probe" -maxdepth 1 -type f \

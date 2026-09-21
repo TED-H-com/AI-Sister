@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 const ARGUMENT: &str = "__macos-ci-capture-probe";
 const GO_TIMEOUT: Duration = Duration::from_secs(30);
-const CAPTURE_PROCESS_TIMEOUT: Duration = Duration::from_secs(20);
+const CAPTURE_PROCESS_TIMEOUT: Duration = Duration::from_secs(40);
 
 #[derive(Serialize)]
 struct ProcessRecord {
@@ -72,11 +72,13 @@ pub fn run(directory: &Path) -> Result<()> {
         .name("macos-capture-process-watchdog".to_string())
         .spawn(|| {
             std::thread::sleep(CAPTURE_PROCESS_TIMEOUT);
-            eprintln!("macOS capture diagnostic exceeded 20 seconds; exiting child process");
+            eprintln!("macOS capture diagnostic exceeded 40 seconds; exiting child process");
             std::process::exit(124);
         })
         .context("cannot start the capture process watchdog")?;
-    let report = sister_capture::macos::diagnostic_probe();
+    let report = sister_capture::macos::diagnostic_probe(&directory);
+    sister_capture::macos_probe::verify_probe_couplings(&report)
+        .map_err(|error| anyhow::anyhow!(error))?;
     write_new_json(&directory.join("capture.json"), &report)
 }
 

@@ -24,6 +24,11 @@ pub mod linux;
 /// macOS 14+ 原生後端：ScreenCaptureKit、Vision 與 Accessibility privacy gate。
 #[cfg(all(target_os = "macos", feature = "macos"))]
 pub mod macos;
+/// S1 diagnostic report types and fail-closed couplings. Native APIs stay in
+/// [`macos`]; this module is compiled during Linux tests so those couplings
+/// cannot hide behind `target_os = "macos"`.
+#[cfg(any(all(target_os = "macos", feature = "macos"), test))]
+pub mod macos_probe;
 pub mod replay;
 pub mod scale;
 pub mod timings;

@@ -28,7 +28,6 @@ use screencapturekit::shareable_content::SCShareableContent;
 use screencapturekit::stream::{
     configuration::SCStreamConfiguration, content_filter::SCContentFilter,
 };
-use serde::Serialize;
 use sister_core::capabilities::CapabilityState;
 use sister_core::config::Config;
 use sister_core::db::Db;
@@ -36,9 +35,13 @@ use sister_core::model::{
     BrowserUrlState, FocusSnapshot, Millis, OcrBlock, PrivacyContext, SensitiveFieldState,
 };
 use std::cell::{Cell, RefCell};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::macos_probe::{
+    self, CaptureOutcome, CaptureProbeReport, CapturedOcrOutcome, FocusOutcome, LocalQueryOutcome,
+    PreflightAccess, SCHEMA, SELF_TEST_SOURCE, VisionSelfTestOutcome,
+};
 use crate::traits::{
     CapturePermit, CompositeBackend, FocusSource, NullClipboard, NullInput, Ocr,
     PrivacyObservation, RawFrame, ScreenSource, SystemContentState, SystemLockState,
@@ -46,116 +49,116 @@ use crate::traits::{
 };
 use crate::{Backend, MasterStopSource, Recorder};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PreflightAccess {
-    Granted,
-    NotGrantedOrUndetermined,
-}
+pub use crate::macos_probe::{
+    CaptureErrorKind, CaptureStage, NativeFailure, StopOutcome, plausible_browser_url,
+};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CaptureStage {
-    ShareableContent,
-    ContentFilter,
-    Screenshot,
-    Pixels,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CaptureErrorKind {
-    InvalidConfiguration,
-    InvalidDimension,
-    InvalidPixelFormat,
-    NoShareableContent,
-    DisplayNotFound,
-    WindowNotFound,
-    ApplicationNotFound,
-    Stream,
-    CaptureStart,
-    CaptureStop,
-    BufferLock,
-    BufferUnlock,
-    InvalidBuffer,
-    Screenshot,
-    Permission,
-    FeatureUnavailable,
-    Ffi,
-    NullPointer,
-    Timeout,
-    Internal,
-    Os,
-    ScreenCaptureKitStream,
-    Other,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct NativeFailure {
-    pub kind: CaptureErrorKind,
-    pub domain: Option<&'static str>,
-    pub code: Option<i32>,
-    pub message: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum CaptureOutcome {
-    NotAttempted,
-    NoDisplay,
-    Captured {
-        display_id: u32,
-        width: usize,
-        height: usize,
-        rgba_bytes: usize,
-    },
-    Failed {
-        stage: CaptureStage,
-        error: NativeFailure,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct CaptureProbeReport {
-    pub schema: u8,
-    pub screen_recording: PreflightAccess,
-    pub accessibility: PreflightAccess,
-    pub capture: CaptureOutcome,
-}
-
-/// 設定頁與 CLI 共用的原生權限事實。這支不觸發 TCC prompt。
-pub fn access_report() -> CaptureProbeReport {
+/// TCC facts plus one optional no-persistence capture. Does not prompt, OCR, or write files.
+fn access_snapshot() -> (
+    PreflightAccess,
+    PreflightAccess,
+    CaptureOutcome,
+    Option<CapturedRgba>,
+) {
     let _ = CGMainDisplayID();
     let screen_recording = measured_access(CGPreflightScreenCaptureAccess());
     let accessibility = measured_access(unsafe { AXIsProcessTrusted() });
-    let capture = if screen_recording == PreflightAccess::Granted {
+    let (capture, pixels) = if screen_recording == PreflightAccess::Granted {
         match capture_rgba(None) {
-            Ok(Some(frame)) => CaptureOutcome::Captured {
-                display_id: frame.display_id,
-                width: frame.width,
-                height: frame.height,
-                rgba_bytes: frame.rgba.len(),
-            },
-            Ok(None) => CaptureOutcome::NoDisplay,
-            Err(failure) => CaptureOutcome::Failed {
-                stage: failure.stage,
-                error: failure.error,
-            },
+            Ok(Some(frame)) => {
+                let outcome = CaptureOutcome::Captured {
+                    display_id: frame.display_id,
+                    width: frame.width,
+                    height: frame.height,
+                    rgba_bytes: frame.rgba.len(),
+                };
+                (outcome, Some(frame))
+            }
+            Ok(None) => (CaptureOutcome::NoDisplay, None),
+            Err(failure) => (
+                CaptureOutcome::Failed {
+                    stage: failure.stage,
+                    error: failure.error,
+                },
+                None,
+            ),
         }
     } else {
-        CaptureOutcome::NotAttempted
+        (CaptureOutcome::NotAttempted, None)
+    };
+    (screen_recording, accessibility, capture, pixels)
+}
+
+/// App-tree diagnostic: TCC facts, optional ScreenCaptureKit pixels, Vision on
+/// the bundled self-test image, in-memory fact query of that text, and a stop
+/// latch round-trip. Captured-screen OCR reports a block count only — never the
+/// text — because this JSON is uploaded as a CI artifact.
+pub fn diagnostic_probe(probe_directory: &Path) -> CaptureProbeReport {
+    let (screen_recording, accessibility, capture, pixels) = access_snapshot();
+    let captured_ocr = match pixels {
+        Some(frame) => captured_frame_ocr(&frame),
+        None => CapturedOcrOutcome::NotAttempted,
+    };
+    let (vision_self_test, self_test_text) = bundled_vision_self_test();
+    let local_query = match &vision_self_test {
+        VisionSelfTestOutcome::Recognized { .. } => {
+            macos_probe::local_query_from_ocr_text(&self_test_text)
+        }
+        VisionSelfTestOutcome::Failed { message, .. } => LocalQueryOutcome::NotAttempted {
+            source: macos_probe::SELF_TEST_QUERY_SOURCE,
+            reason: format!("self-test OCR did not run: {message}"),
+        },
+    };
+    let stop = macos_probe::probe_stop(&probe_directory.join("s1-stop"));
+    let focus = match accessibility {
+        PreflightAccess::Granted => match MacFocus::observe_current() {
+            Some(_) => FocusOutcome::Known,
+            None => FocusOutcome::Unknown,
+        },
+        PreflightAccess::NotGrantedOrUndetermined => FocusOutcome::NotAttempted,
     };
     CaptureProbeReport {
-        schema: 2,
+        schema: SCHEMA,
         screen_recording,
         accessibility,
         capture,
+        captured_ocr,
+        vision_self_test,
+        local_query,
+        stop,
+        focus,
     }
 }
 
-/// 相容舊的 diagnostic 呼叫名；現在報告同時驗像素與 AX 權限。
-pub fn diagnostic_probe() -> CaptureProbeReport {
-    access_report()
+/// Doctor-facing foreground probe. Window titles stay on the machine that ran
+/// `sister doctor`; the CI diagnostic JSON only records Known/Unknown.
+pub enum DesktopProbe {
+    AccessibilityNotGranted,
+    NoForeground { why: String },
+    Foreground { app: String, title: String },
+}
+
+pub fn probe_desktop() -> DesktopProbe {
+    if !unsafe { AXIsProcessTrusted() } {
+        return DesktopProbe::AccessibilityNotGranted;
+    }
+    match frontmost() {
+        Ok(front) => DesktopProbe::Foreground {
+            app: FocusSnapshot {
+                app_id: front.app_id,
+                app_name: front.app_name,
+                window_title: (!front.identity.window_title.is_empty())
+                    .then(|| front.identity.window_title.clone()),
+                url: None,
+                pid: Some(i64::from(front.identity.pid)),
+            }
+            .app_key(),
+            title: front.identity.window_title,
+        },
+        Err(error) => DesktopProbe::NoForeground {
+            why: format!("{error:#}"),
+        },
+    }
 }
 
 fn measured_access(granted: bool) -> PreflightAccess {
@@ -163,6 +166,58 @@ fn measured_access(granted: bool) -> PreflightAccess {
         PreflightAccess::Granted
     } else {
         PreflightAccess::NotGrantedOrUndetermined
+    }
+}
+
+fn captured_frame_ocr(frame: &CapturedRgba) -> CapturedOcrOutcome {
+    let width = match u32::try_from(frame.width) {
+        Ok(width) => width,
+        Err(_) => {
+            return CapturedOcrOutcome::Failed {
+                message: "captured width exceeds u32".to_owned(),
+            };
+        }
+    };
+    let height = match u32::try_from(frame.height) {
+        Ok(height) => height,
+        Err(_) => {
+            return CapturedOcrOutcome::Failed {
+                message: "captured height exceeds u32".to_owned(),
+            };
+        }
+    };
+    let raw = RawFrame::from_rgba(0, 0, width, height, frame.rgba.clone());
+    match VisionOcr::new(&[]).recognize(&raw) {
+        Ok(blocks) => CapturedOcrOutcome::Recognized {
+            block_count: blocks.len(),
+        },
+        Err(error) => CapturedOcrOutcome::Failed {
+            message: format!("{error:#}"),
+        },
+    }
+}
+
+fn bundled_vision_self_test() -> (VisionSelfTestOutcome, String) {
+    match VisionOcr::new(&["zh-Hant".to_owned(), "en-US".to_owned()]).self_test() {
+        Ok(blocks) => {
+            let text = blocks
+                .iter()
+                .map(|block| block.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut outcome = macos_probe::evaluate_self_test_text(&text);
+            if let VisionSelfTestOutcome::Recognized { block_count, .. } = &mut outcome {
+                *block_count = blocks.len();
+            }
+            (outcome, text)
+        }
+        Err(error) => (
+            VisionSelfTestOutcome::Failed {
+                source: SELF_TEST_SOURCE,
+                message: format!("{error:#}"),
+            },
+            String::new(),
+        ),
     }
 }
 
@@ -531,7 +586,7 @@ impl TreeVisitor for AddressVisitor {
             .ok()
             .and_then(|value: CFType| value.downcast::<CFString>())
             .map(|value| value.to_string());
-        if let Some(value) = value.filter(|value| plausible_browser_url(value)) {
+        if let Some(value) = value.filter(|value| macos_probe::plausible_browser_url(value)) {
             self.found.replace(Some(value));
             TreeWalkerFlow::Exit
         } else {
@@ -706,6 +761,17 @@ impl VisionOcr {
             languages: languages.to_vec(),
         }
     }
+
+    /// 讀內建帳單圖一次。這條路不碰螢幕、不需要 Screen Recording TCC。
+    fn self_test(&mut self) -> Result<Vec<OcrBlock>> {
+        const IMAGE: &[u8] = include_bytes!("../assets/ocr-selftest-zh.png");
+        let img = image::load_from_memory(IMAGE)
+            .context("內建的自我測試圖解不開")?
+            .to_rgba8();
+        let (width, height) = img.dimensions();
+        let frame = RawFrame::from_rgba(0, 0, width, height, img.into_raw());
+        self.recognize(&frame)
+    }
 }
 
 impl Ocr for VisionOcr {
@@ -830,18 +896,4 @@ pub fn recorder(
         image_dir,
         MasterStopSource::Latch(data_dir),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn browser_url_filter_rejects_search_text_and_accepts_addresses() {
-        assert!(plausible_browser_url("https://example.com/a"));
-        assert!(plausible_browser_url("example.com"));
-        assert!(plausible_browser_url("about:blank"));
-        assert!(!plausible_browser_url("search words"));
-        assert!(!plausible_browser_url(""));
-    }
 }
