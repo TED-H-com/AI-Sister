@@ -412,8 +412,13 @@ select {
   margin-top: 9px;
 }
 
-.azure-tts {
+.azure-tts,
+.usage-status {
   background: rgb(246 236 223 / 2%);
+}
+
+.usage-board p {
+  margin: 0 0 6px;
 }
 
 .azure-actions {
