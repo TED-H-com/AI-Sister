@@ -12898,14 +12898,24 @@ pub mod prune {
         for f in &r.failed {
             writeln!(out, "  ⚠  刪不掉，這個畫面還在磁碟上：{f}")?;
         }
-        // 指向它們的那幾列**留著了**，所以下一輪會自己再試一次。少了這句，
-        // 上面那幾個 ⚠ 讀起來像是要他自己去把檔案挖出來刪掉。
+        // 檔沒刪成。字有沒有清掉是另一個數字：`words_cleared_on_kept_frames`
+        // 是 0 的時候（只過了畫面保留期、字刻意留著）不可以說字已經移除。
+        // 預覽一列都沒動，這一段也不准用完成式。
         if !preview && !r.failed.is_empty() {
-            writeln!(
-                out,
-                "     （指向它們的紀錄先留著，不然就沒有人找得到那些檔案了。\
-                 \n     下一輪會再試一次；一直失敗的話多半是防毒或權限擋住了）"
-            )?;
+            if r.words_cleared_on_kept_frames > 0 {
+                writeln!(
+                    out,
+                    "     （這 {} 列的字已經移除，畫面檔還在。\
+                     \n     下一輪只會再試刪檔。）",
+                    r.words_cleared_on_kept_frames
+                )?;
+            } else {
+                writeln!(
+                    out,
+                    "     （字還在，畫面檔還在。\
+                     \n     下一輪只會再試刪檔。）"
+                )?;
+            }
         }
         Ok(())
     }
@@ -13087,6 +13097,63 @@ pub mod prune {
                     "一列都沒有的時候不要生出一句話來"
                 );
             }
+        }
+
+        fn render(report: &PruneReport, preview: bool) -> String {
+            let mut out = Vec::new();
+            print_report(report, preview, &mut out).expect("write");
+            String::from_utf8(out).expect("utf8")
+        }
+
+        /// 圖刪不掉的時候，句子要講字已經移除、檔還在、下一輪只再試刪檔。
+        /// 列數來自報告那一欄，不是這句話寫死的。
+        #[test]
+        fn stuck_files_say_words_were_removed_and_the_next_pass_only_retries_the_file() {
+            for n in [1_u64, 4] {
+                let said = render(
+                    &PruneReport {
+                        failed: vec!["frames/a.png: denied".into()],
+                        words_cleared_on_kept_frames: n,
+                        ..Default::default()
+                    },
+                    false,
+                );
+                assert!(said.contains(&format!("這 {n} 列的字已經移除")), "{said}");
+                assert!(said.contains("畫面檔還在"), "{said}");
+                assert!(said.contains("下一輪只會再試刪檔"), "{said}");
+                assert!(!said.contains("防毒"), "{said}");
+                assert!(!said.contains("權限"), "{said}");
+            }
+            let preview = render(
+                &PruneReport {
+                    failed: vec!["frames/a.png: denied".into()],
+                    words_cleared_on_kept_frames: 4,
+                    ..Default::default()
+                },
+                true,
+            );
+            assert!(
+                !preview.contains("字已經移除"),
+                "預覽還沒刪，不能說字已經移除：{preview}"
+            );
+        }
+
+        /// 數過、是 0 列被剝字（畫面保留期把字留著）不可以和「字已經移除」同一句。
+        #[test]
+        fn stuck_files_with_no_cleared_words_do_not_claim_the_words_are_gone() {
+            let said = render(
+                &PruneReport {
+                    failed: vec!["frames/a.png: denied".into()],
+                    words_cleared_on_kept_frames: 0,
+                    ..Default::default()
+                },
+                false,
+            );
+            assert!(said.contains("字還在"), "{said}");
+            assert!(said.contains("畫面檔還在"), "{said}");
+            assert!(said.contains("下一輪只會再試刪檔"), "{said}");
+            assert!(!said.contains("字已經移除"), "{said}");
+            assert!(!said.contains("防毒"), "{said}");
         }
     }
 }

@@ -7064,6 +7064,10 @@ struct Erasure {
     /// 刪不掉的檔案。**不吞掉**：那幾張截圖還躺在磁碟上，而使用者以為
     /// 它們已經不在了。
     failed: Vec<String>,
+    /// 那些刪不掉的畫面裡，列還留著、字已經清掉的列數。
+    ///
+    /// `frames` 不含這些列。0 是數過、這一輪沒有這種列，不是沒問。
+    words_cleared: u64,
     /// 資料庫說有圖、磁碟上找不到那個檔。
     ///
     /// 不是失敗（東西確實不在了），但**也不是刪掉了**。少了這一欄，預覽說
@@ -7112,6 +7116,7 @@ impl From<sister_core::retention::PruneReport> for Erasure {
             queries: r.queries_deleted,
             sessions: r.sessions_deleted,
             failed: r.failed,
+            words_cleared: r.words_cleared_on_kept_frames,
             missing: r.missing,
             // action log 不在資料庫裡，`PruneReport` 看不到它。兩個呼叫端各自
             // 問一次 `ActionLog`，所以這裡只能是 0——和下面 `sessions_left`

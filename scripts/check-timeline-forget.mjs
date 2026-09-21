@@ -93,6 +93,7 @@ function erasure(over = {}) {
     // 比誰都容易被漏列——**它是唯一一個站在區間外面也會被刪掉的東西**。
     grant: false,
     failed: [],
+    words_cleared: 0,
     missing: 0,
     // 預覽算不出「刪完之後」——`null` 是「沒問過」，不是 0。
     sessions_left: null,
@@ -1160,6 +1161,54 @@ console.log("⑬ 六顆寫入鍵：寫不進去的時候，不准長得像成功
    *   那兩顆共用 `runChapterEdit`，所以上面第一層數得到它們（那兩個指令各要 2 處）；
    *   但「按下去真的說了話」在這裡只驗過活動級那一份。把 `pieceRow` 裡那兩顆的
    *   click handler 整個拿掉，這一節照樣綠。 */
+}
+
+console.log("⑭ 圖刪不掉：字已經移除、檔還在、下一輪只再試刪檔");
+{
+  // 列數來自回傳的 `words_cleared`。寫死「字已經移除」而不帶這個數字，
+  // 或者把 0 列也說成已經移除，下面兩段會有一段紅。
+  const cleared = await open({
+    forget_range: erasure({
+      failed: ["frames/2026/08/a.png: Access is denied"],
+      words_cleared: 5,
+      frames: 0,
+      images: 0,
+    }),
+  });
+  await cleared.press();
+  await cleared.press();
+  const said = cleared.say();
+  check("點名刪不掉的畫面檔", said.includes("畫面檔刪不掉"), said);
+  check("用報告上的列數說字已經移除", said.includes("這 5 列的字已經移除"), said);
+  check("講畫面檔還在", said.includes("畫面檔還在"), said);
+  check("下一步只再試刪檔", said.includes("下一輪只會再試刪檔"), said);
+  check("不猜防毒或權限", !said.includes("防毒") && !said.includes("權限"), said);
+
+  const none = await open({
+    forget_range: erasure({
+      failed: ["frames/2026/08/b.png: Access is denied"],
+      words_cleared: 0,
+    }),
+  });
+  await none.press();
+  await none.press();
+  const quiet = none.say();
+  check("數到 0 列就不說字已經移除", !quiet.includes("字已經移除"), quiet);
+  check("數到 0 列要說字還在", quiet.includes("字還在"), quiet);
+  check("0 列也講檔還在、下一輪只試刪檔", quiet.includes("畫面檔還在") && quiet.includes("下一輪只會再試刪檔"), quiet);
+
+  const unknown = await open({
+    forget_range: erasure({
+      failed: ["frames/2026/08/c.png: Access is denied"],
+      words_cleared: undefined,
+    }),
+  });
+  await unknown.press();
+  await unknown.press();
+  const withheld = unknown.say();
+  check("沒帶回列數就不說字已經移除", !withheld.includes("字已經移除"), withheld);
+  check("沒帶回列數也不說字還在", !withheld.includes("字還在"), withheld);
+  check("沒帶回列數仍講檔還在、下一輪只試刪檔", withheld.includes("畫面檔還在") && withheld.includes("下一輪只會再試刪檔"), withheld);
 }
 
 console.log("");

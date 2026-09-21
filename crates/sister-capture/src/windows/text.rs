@@ -2,6 +2,9 @@
 //! direct Document parent. No full-document/tree dump, ValuePattern fallback,
 //! focus changes, content cache or event/keystroke listener.
 use crate::assistive::{self, ReadWindow, TextEnd, TextRange, TextRect, TextRole, VisibleText};
+use crate::page_crop::{
+    Frontier, PAGE_WALK_DEPTH_CAP, PageCrop, PageNode, choose_page_crop, frontier, sibling_chain,
+};
 use sister_core::model::AssistiveBlock;
 use windows::{
     Win32::{
@@ -137,55 +140,83 @@ impl FocusedText<'_> {
     }
 }
 impl FocusedText<'_> {
-    /// The single on-screen page-sized Group under this Document, if there is
-    /// exactly one. A deeper walk is capped so a PDF viewer cannot turn a
-    /// text read into a full tree build.
+    /// The Document range to clip to, when the walk finished and exactly one
+    /// Group qualified as the on-screen page.
+    ///
+    /// Every direct child is seeded, the same way each visited node's children
+    /// are. The focused Document itself is not a candidate. Stopping on the
+    /// node budget, or on a child past the depth cap, does not clip: those
+    /// counts are unfinished. Zero qualified pages is a different decision
+    /// from an unfinished count, and neither one clips.
+    ///
+    /// Group, offscreen, monitor overlap, and the thumbnail/sidebar size floor
+    /// are decided in `crate::page_crop`. The floor is not the page's real size.
     fn onscreen_page_scope(
         &self,
         pattern: &IUIAutomationTextPattern,
     ) -> Option<IUIAutomationTextRange> {
         let walker = unsafe { self.automation.ControlViewWalker() }.ok()?;
+        let monitor = super::screen::focused_monitor(self.hwnd).map(|(_, bounds)| rect(bounds));
         let mut pending = Vec::new();
-        if let Ok(first) = unsafe { walker.GetFirstChildElement(&self.element) } {
-            pending.push((first, 1u32));
+        for child in sibling_chain(
+            unsafe { walker.GetFirstChildElement(&self.element) }.ok(),
+            |child| unsafe { walker.GetNextSiblingElement(child) }.ok(),
+        ) {
+            pending.push((child, 1u32));
         }
-        let mut scanned = 0u32;
-        let mut found: Option<IUIAutomationTextRange> = None;
-        while let Some((current, depth)) = pending.pop() {
-            scanned += 1;
-            if scanned > 128 {
-                return found;
-            }
-            let is_page = unsafe { current.CurrentControlType() }.ok()
-                == Some(UIA_GroupControlTypeId)
-                && unsafe { current.CurrentIsOffscreen() }
-                    .ok()
-                    .is_some_and(|value| !value.as_bool())
-                && unsafe { current.CurrentBoundingRectangle() }
-                    .ok()
-                    .is_some_and(|bounds| {
-                        bounds.right - bounds.left >= 200 && bounds.bottom - bounds.top >= 80
-                    });
-            if is_page && let Ok(range) = unsafe { pattern.RangeFromChild(&current) } {
-                if found.is_some() {
-                    return None;
+        let mut visited = 0u32;
+        let mut walk_finished = true;
+        let mut nodes = Vec::new();
+        let mut elements = Vec::new();
+        while walk_finished && let Some((current, depth)) = pending.pop() {
+            let child_at_cap = if depth >= PAGE_WALK_DEPTH_CAP {
+                Some(unsafe { walker.GetFirstChildElement(&current) }.is_ok())
+            } else {
+                None
+            };
+            match frontier(visited, depth, child_at_cap) {
+                Frontier::BudgetLeftNodes => walk_finished = false,
+                Frontier::DepthLeftChildren => {
+                    // Count this node, then stop. Its children are past the cap.
+                    visited += 1;
+                    nodes.push(observe_page(&current));
+                    elements.push(current);
+                    walk_finished = false;
                 }
-                found = Some(range);
-            }
-            if depth < 6
-                && let Ok(mut child) = unsafe { walker.GetFirstChildElement(&current) }
-            {
-                loop {
-                    let next = unsafe { walker.GetNextSiblingElement(&child) }.ok();
-                    pending.push((child, depth + 1));
-                    match next {
-                        Some(sibling) => child = sibling,
-                        None => break,
+                Frontier::Open { descend } => {
+                    visited += 1;
+                    nodes.push(observe_page(&current));
+                    if descend {
+                        for child in sibling_chain(
+                            unsafe { walker.GetFirstChildElement(&current) }.ok(),
+                            |child| unsafe { walker.GetNextSiblingElement(child) }.ok(),
+                        ) {
+                            pending.push((child, depth + 1));
+                        }
                     }
+                    elements.push(current);
                 }
             }
         }
-        found
+        match choose_page_crop(&nodes, monitor, walk_finished) {
+            PageCrop::Crop(index) => {
+                let element = elements.get(index)?;
+                unsafe { pattern.RangeFromChild(element) }.ok()
+            }
+            PageCrop::NoQualifiedPage | PageCrop::Unresolved => None,
+        }
+    }
+}
+
+fn observe_page(element: &IUIAutomationElement) -> PageNode {
+    PageNode {
+        is_group: unsafe { element.CurrentControlType() }
+            .ok()
+            .map(|kind| kind == UIA_GroupControlTypeId),
+        offscreen: unsafe { element.CurrentIsOffscreen() }
+            .ok()
+            .map(|value| value.as_bool()),
+        bounds: unsafe { element.CurrentBoundingRectangle() }.ok().map(rect),
     }
 }
 fn text_pattern(element: &IUIAutomationElement) -> Option<IUIAutomationTextPattern> {
@@ -226,9 +257,9 @@ impl FocusedText<'_> {
         if let Some(pattern) = text_pattern(&self.element) {
             // Edge PDF often keeps keyboard focus on the TextPattern Document.
             // GetVisibleRanges then flattens offscreen pages into the same
-            // range. One on-screen page-sized Group is that page; clip to it.
-            // Two page-sized groups means more than one page is on screen, so
-            // leave the document ranges alone.
+            // range. Clip only when the walk finished and exactly one Group
+            // is the on-screen page. An unfinished walk, no qualified page,
+            // or more than one page leaves the document ranges alone.
             if self.role()? == TextRole::Document
                 && let Some(scope) = self.onscreen_page_scope(&pattern)
             {
