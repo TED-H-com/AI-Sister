@@ -102,8 +102,8 @@ Document 的 `GetVisibleRanges` 會把畫面外的那一頁也算進去。`SetFo
 所以現在的契約是：
 
 - **產品**（`crates/sister-capture/src/windows/text.rs` 接線、`page_crop.rs` 判定，`175f70e` 起、alpha.146 改寫）：焦點若是自帶 TextPattern 的 Document，就從它的直接子節點開始**廣度優先**走查，找畫面上、頁面大小的 Group，用 `RangeFromChild` 把可見範圍剪到那一個。走查上限仍是 128 個節點、深度 6，**沒有調大**。
-  結局有三種，只有第一種會剪：走完而且剛好一個合格（剪）／走完而且零個合格（不剪，這是「量過了，沒有」）／沒走完（不剪，這是「還沒數完」）。多加一條例外：沒走完、但**深度 1 那一層全部觀察過**、而且那一層剛好一個合格時也剪，更深處的合格節點不拿來頂替。理由是 `77078fa` 在原生 CI 上量到較寬的走查會被 text run 把 128 用完（`large=0`），而加上直接子節點那一關之後是 `scanned=23 groups=2 large=1`。
-  判定整個搬進 `page_crop.rs`，是純函式，Linux 的 `cargo test` 跑得到（22 條）。`text.rs` 那半只負責 COM 走查與 `nodes[i]`／`elements[i]` 對齊，仍然**沒有任何執行覆蓋**。
+  結局有三種，只有第一種會剪：走完而且剛好一個合格（剪）／走完而且零個合格（不剪，這是「量過了，沒有」）／沒走完（不剪，這是「還沒數完」）。**（alpha.147 補上第四種：走完了，但中途有一次兄弟讀取失敗——那是「讀不下去」，也不剪。見 §9 的 R6。）**多加一條例外：沒走完、但**深度 1 那一層全部觀察過**、而且那一層剛好一個合格時也剪，更深處的合格節點不拿來頂替。理由是 `77078fa` 在原生 CI 上量到較寬的走查會被 text run 把 128 用完（`large=0`），而加上直接子節點那一關之後是 `scanned=23 groups=2 large=1`。
+  判定整個搬進 `page_crop.rs`，是純函式，Linux 的 `cargo test` 跑得到（alpha.146 是 22 條，alpha.147 的 R6 之後是 28 條）。`text.rs` 那半只負責 COM 走查與 `nodes[i]`／`elements[i]` 對齊，仍然**沒有任何執行覆蓋**。
   角色仍是焦點元素自己的：Document 就是 `"document"`，Group 才是 `"document-region"`。
 - **測試**（`windows_uia.rs`）：第一頁文字接受 `"document"` 或 `"document-region"`。捲動之後若 UIA 是空的，代表焦點還在已經跑到畫面外的第一頁 Group，存下來的 assistive blocks 也必須是空的。若 UIA 不是空的，代表焦點仍是活著的 Document，文字必須是現在這一頁（`02-6655-4433`），而且不能再含第一頁的 `0800-444-555`。
 - **Fixture**（`uia-edge-reader.ps1`）：
@@ -253,13 +253,14 @@ f13dea3 docs: the PDF clip is breadth-first with a depth-1 exception
 「深度 1 那層全部看完、而且剛好一塊符合」的例外。判定限制在深度 1 反而**降低**誤剪機率：
 深處包著 text run 的容器也可能大於 200×80 而且和螢幕交疊。
 
-純判定搬進 `crates/sister-capture/src/page_crop.rs`（22 條測試，Linux 上跑得到），
+純判定搬進 `crates/sister-capture/src/page_crop.rs`（當時 22 條測試，alpha.147 之後 28 條，Linux 上跑得到），
 `windows/text.rs` 只留接線。這是這個 repo 對付「`#[cfg(windows)]` 零執行覆蓋」的固定招式。
 
-### 還沒上 main：a147
+### a147（**這一節寫於出貨之前；a147 已經在 2026-09-22 出貨，最終狀態見 §9–§11**）
 
 - worktree `/home/ted-h/tmp-tests/wt-a147-usageview`，分支 `a147-usageview`
-- **沒有 push，沒有 bump 版號，沒有寫 RELEASE-NOTES。**
+- 底下每一條寫的是**當時**的規劃。R7 實際交回來的東西和這裡的描述不完全一樣
+  （`setCombo` 的乙、`setLoginStartup` 的成功路徑都和這裡寫的不同），差在哪裡見 §10。
 - R1：用量畫面那層純判定從 `apps/desktop/src-tauri/src/usage_status.rs` 搬進 `sister-usage`
   底下一個新的 `view` 模組（6 條測試）。桌面那棵樹在這台機器上編不起來，所以
   那層判定本來一條 Linux 測試都沒有。`sister-usage` **沒有**因此依賴 `sister-core`——
@@ -424,3 +425,52 @@ painter 修好之後下一次重讀會收斂到真相）。第三條現在沒有
 `5707a22` 的 run `35671862572` 全綠：6 個真 job `success`，
 `Website` 和 `Release` 是 `skipped`（沒有 tag，正確）。
 狀態是問 `gh api repos/…/actions/runs/<id>/jobs` 來的，不是 `gh run view --json`。
+
+---
+
+## 11. R7b 收貨與 a147 出貨（2026-09-22 凌晨）
+
+### 11.1　R7b 交回來的東西
+
+產品那半（`settings.js`，+51/−?）做了三件事，三件都照派工單：
+
+1. `setLoginStartup` 重寫：`try` 裡只留 `await invoke("login_startup_set")`，
+   成功的重畫移到外面自己一道 `try/catch`，失敗那一臂的區域變數改名 `readView`
+   避免和外層的 `startupView` 混在一起，失敗臂結尾補 `return`。
+2. 四處「補畫」全刪，外層 `try/catch` 留著，註解改成講真話
+   （「畫面會停在重畫寫到一半的樣子——這裡修不了那件事」）。
+3. `installPersonaAssets` / `cancelPersonaAssetInstall` / `removePersonaAssets`
+   一個字都沒動（它們本來就沒有補畫）。
+
+測試那半：`throwOnceOnText` 換成 `throwOnText`，回傳 `{ seen, disarm }`，
+**預設每次命中都丟**。五條靠夾具才綠的正面句改寫成三件在決定性失敗底下成立的事，
+另外新增一節 `㉚ᵏ²` 四條守成功路徑。
+
+### 11.2　我自己驗的（不是讀 RESULT 檔）
+
+| 量的東西 | 結果 |
+|---|---|
+| `check-settings-say.mjs` | 495 ✔ / 0 ✗，exit 0 |
+| a146 的同一支 | 425 ✔ ⇒ 這一版 **+70 條**；`check(` 的位置數 274 → 344 也是 +70（兩支獨立儀器同一個數字） |
+| a146 的 274 條有沒有消失 | **0 條** |
+| 刀 J2：成功路徑的重畫搬回外層 `try` | 紅，**恰好 1 條**：`登入項寫入成功而重畫丟例外時，不再讀一次，說明也不標成失敗` |
+| 刀 L：painter 把 `disabled` 改成寫在 `textContent` **之後** | 紅，**3 條**，含兩條新的「沒有卡死」 |
+| `gates-all.sh` | **52 條全綠** |
+| 五顆主題 commit 逐顆 | 每一顆都 `cargo check --workspace --all-targets` 綠，動到 JS 的兩顆 gate 也綠 |
+
+**刀 L 是 grok 沒跑的那一刀，也是這一輪最重要的一刀。** 夾具丟在 `textContent`
+上，而 painter 原本先寫 `disabled` 才寫 `textContent`——所以丟出去的時候勾勾早就
+放開了，「沒有卡死」那兩條有可能只是剛好成立。把兩筆寫入的順序對調之後它們紅了，
+這才證明它們守的是真的東西，不是夾具的巧合。
+
+### 11.3　我在收貨時自己多改的一處
+
+grok 照派工單留了 `{ once: true }` 這個選項，但沒有任何呼叫端用它。
+我把它刪了，理由寫在原地：留一個沒有人用、也沒有人測的「只丟一次」開關，
+就是把這一輪剛關上的那扇門留著。刪完 gate 仍是 495 ✔ / 0 ✗。
+
+### 11.4　grok 自己回報的一個否定結果
+
+它在成功路徑的 catch 裡暫時加過三行「把 `disabled` 放回來」，量到**拿掉那三行
+整份 gate 仍然全綠**，於是沒有把它留在交出去的檔案裡，並在 `RESULT-R7B.md` 裡
+寫明白。那是對的處置——沒有人守的「修法」不該出貨。
