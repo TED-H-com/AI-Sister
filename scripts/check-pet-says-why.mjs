@@ -369,6 +369,7 @@ async function open(
   let audioPlays = 0;
   let audioPauses = 0;
   let localSpeaks = 0;
+  const localSpeechTexts = [];
   const playbackTrace = [];
 
   // fake-dom 的 selector 子集刻意很小；這一頁新增的 Azure allowlist 是 attribute
@@ -454,7 +455,8 @@ async function open(
     getVoices: () => systemVoices ?? [],
     addEventListener() {},
     cancel() {},
-    speak() {
+    speak(utterance) {
+      localSpeechTexts.push(utterance.text);
       localSpeaks += 1;
     },
   };
@@ -585,6 +587,7 @@ async function open(
       await tick();
     },
     localSpeaks: () => localSpeaks,
+    localSpeechTexts: () => [...localSpeechTexts],
     urlPolicy: () => node("[data-url-policy]"),
     urlPolicyQuestion: () => node("[data-url-policy-question]").textContent,
     urlPolicyActions: () => node("[data-url-policy-actions]"),
@@ -2994,6 +2997,32 @@ console.log("63. 純瀏覽器 screenshot demo 有答案外觀，但沒有 native
   );
 }
 
+// 走輸入框 → ask IPC → 正式 renderer，再讀實際掛進答案泡泡的 disclosure。
+// open 是原生 details 的公開 DOM 屬性；瀏覽器的 summary 點擊另做真瀏覽器驗證。
+function checkOverviewWhy(p, name, exact) {
+  const details = p.hits().querySelectorAll("details").find(
+    (node) => node.querySelector("p")?.textContent === exact,
+  );
+  check(`${name} 精確說明存在且預設收合`,
+    !!details && !details.open && !details.hidden &&
+      details.children[0]?.tag === "summary" &&
+      details.children[0]?.textContent === "為什麼", p.hitTexts());
+  if (details) details.open = true;
+  check(`${name} 展開後保留完整原句`,
+    details?.open === true && details.querySelector("p")?.textContent === exact,
+    details?.textContent);
+  if (details) details.open = false;
+}
+
+function checkOverviewVoice(p, name) {
+  const voices = p.hits().querySelectorAll(".overview-voice");
+  check(`${name} 收合時有人話且不是內部說明`,
+    voices.length > 0 && voices.every((node) =>
+      !node.hidden && node.textContent.trim().length > 0 &&
+      !/OCR|理解卡|理解記憶|審閱層|模型|自報信心/.test(node.textContent)),
+    voices.map((node) => node.textContent));
+}
+
 console.log("64. 記憶總覽只畫有證據的 L2 假設；證據要真人按才開");
 {
   let asks = 0;
@@ -3039,6 +3068,16 @@ console.log("64. 記憶總覽只畫有證據的 L2 假設；證據要真人按�
   });
   await p.type("QUESTION_MUST_STAY_LOCAL");
   const text = azureCalls(p)[0]?.arg?.text ?? "";
+  checkOverviewVoice(p, "ready");
+  for (const [name, exact] of [
+    ["ready", "我目前對最近幾段有這些理解。每張下面都有畫面出處按鈕；內容可能由模型整理、審閱層修訂，或由你修正，不是我量到的確定事實："],
+    ["truncated", "這裡只列最近一部分有證據的理解。"],
+    ["withheld", "另外有 2 張理解卡目前沒有可點開的畫面出處，這裡沒有列。"],
+    ["interpreter", "模型整理的假設 · 模型自報信心 0.31（不是量出來的）"],
+    ["reviewer", "審閱層修訂 · 原模型自報信心 0.42（不是量出來的）"],
+    ["user", "你修正過 · 不是她量出來的，也不是模型說的"],
+  ]) checkOverviewWhy(p, name, exact);
+
   check(
     "ready 明講是可修正的理解／假設，不冒充確定事實",
     p.hitTexts().some(
@@ -3126,7 +3165,7 @@ console.log("64. 記憶總覽只畫有證據的 L2 假設；證據要真人按�
   );
 
   const expected =
-    "我目前對最近幾段有這些理解。每張下面都有畫面出處按鈕；內容可能由模型整理、審閱層修訂，或由你修正，不是我量到的確定事實：\n修好安裝更新\n審閱後的更新流程\n這是我自己修正的說法";
+    "最近這幾件事，我記得是這樣。\n修好安裝更新\n審閱後的更新流程\n這是我自己修正的說法";
   check("Azure overview payload 恰好只有正文", text === expected, text);
   for (const localOnly of [
     "QUESTION_MUST_STAY_LOCAL",
@@ -3167,19 +3206,20 @@ console.log("65. raw-only／empty／證據遺失各自說實話，不掉進一�
     {
       overview: { kind: "raw_only" },
       wanted: "有原始紀錄，但還沒有整理成能直接回答的理解記憶",
-      azure:
-        "我有原始紀錄，但還沒有整理成能直接回答的理解記憶；這次不會拿 OCR 片段冒充答案。",
+      exact: "我有原始紀錄，但還沒有整理成能直接回答的理解記憶；這次不會拿 OCR 片段冒充答案。",
+      azure: "有記下來，但還沒理清楚。",
     },
     {
       overview: { kind: "empty" },
       wanted: "目前還沒有留下能回答這題的記憶",
-      azure: "我目前還沒有留下能回答這題的記憶。",
+      exact: "我目前還沒有留下能回答這題的記憶。",
+      azure: "這個我沒印象。",
     },
     {
       overview: { kind: "evidence_missing", cards: 3 },
       wanted: "目前沒有可點開的畫面出處",
-      azure:
-        "我有整理過的理解記憶，但最近這 3 張卡片目前沒有可點開的畫面出處；這裡不把它們當成答案。",
+      exact: "我有整理過的理解記憶，但最近這 3 張卡片目前沒有可點開的畫面出處；這裡不把它們當成答案。",
+      azure: "我有點印象，但找不到畫面，所以不敢說。",
     },
   ];
   for (const test of cases) {
@@ -3194,6 +3234,12 @@ console.log("65. raw-only／empty／證據遺失各自說實話，不掉進一�
       recording_state: "recording",
     });
     await p.type("你知道了什麼");
+    checkOverviewWhy(p, test.overview.kind, test.exact);
+    checkOverviewVoice(p, test.overview.kind);
+    check(`${test.overview.kind} 沒有答案卡片或證據按鈕`,
+      p.hits().querySelector(".hit, .overview-evidence") === null,
+      p.hitTexts());
+
     check(`${test.overview.kind} 有自己的答案`, p.hitTexts().some((line) => line.includes(test.wanted)), p.hitTexts());
     check(
       `${test.overview.kind} 不顯示 OCR 或 generic empty`,
@@ -3209,6 +3255,33 @@ console.log("65. raw-only／empty／證據遺失各自說實話，不掉進一�
       azureCalls(p),
     );
   }
+}
+
+console.log("65b. 總覽的大腦狀態精確版可展開，本機朗讀不念內部說明");
+for (const [state, exact] of [
+  ["search_failed", "Codex 這次沒有完成查詢；下方是依原問題找到的本機記憶。到設定按「測試目前大腦」即可重測。"],
+  ["consent_required", "這題只顯示本機結果；第二張「雲端解讀」目前沒有授權 Codex 接手。"],
+  ["not_configured", "到設定選一個 CLI，大腦才會接手文字問題。"],
+]) {
+  const p = await open({
+    ask: answer({ kind: "memory_overview", overview: { kind: "empty" }, brain: { state, provider: "Codex" } }),
+    recording_state: "recording",
+    persona_read: { id: "chatgpt", enabled: true, motion: true, tap_lines: true, voice_enabled: true },
+  }, { systemVoices: [{ name: "Hanhan", lang: "zh-TW", localService: true }] });
+  await p.type("你知道了什麼");
+  checkOverviewWhy(p, `brain-${state}`, exact);
+  checkOverviewVoice(p, `brain-${state}`);
+  for (const details of p.hits().querySelectorAll("details")) details.open = true;
+  await p.clickElement(p.localReadButton());
+  check(`brain-${state} 本機朗讀有人話、不念展開說明`,
+    p.localSpeechTexts().length === 1 &&
+      p.localSpeechTexts()[0].includes("這個我沒印象。") &&
+      !p.localSpeechTexts()[0].includes(exact) &&
+      !p.localSpeechTexts()[0].includes("為什麼") &&
+      !p.localSpeechTexts()[0].includes("我目前還沒有留下能回答這題的記憶。"),
+    p.localSpeechTexts());
+  const calls = p.invokes.filter(({ cmd }) => cmd === "ask").length;
+  check(`brain-${state} 展開收合不重送 ask`, calls === 1, p.invokes);
 }
 
 console.log("66. 未知 overview kind 是 contract error，不偽裝成沒有記憶");

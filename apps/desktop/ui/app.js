@@ -5041,7 +5041,7 @@ function answerTextForLocalSpeech() {
   if (grounded !== "") return grounded;
   const copy = hitList.cloneNode(true);
   for (const node of copy.querySelectorAll(
-    ".hit-source, .hits-mark, .hits-read, .hits-cloud, button, a",
+    ".hit-source, .hits-mark, .hits-read, .hits-cloud, .overview-why, button, a",
   )) {
     node.remove();
   }
@@ -5581,6 +5581,18 @@ function answerAzureLine() {
   return li;
 }
 
+/** 精確說明留在可展開的本機文字，不併入朗讀正文。 */
+function overviewWhy(text) {
+  const details = document.createElement("details");
+  details.className = "overview-why";
+  const summary = document.createElement("summary");
+  summary.textContent = "為什麼";
+  const explanation = document.createElement("p");
+  explanation.textContent = text;
+  details.append(summary, explanation);
+  return details;
+}
+
 /** L2 卡片的作者與信心來源不是答案正文；這一行只留在本機畫面上。 */
 function overviewProvenance(card) {
   const modelConfidence = () => {
@@ -5615,11 +5627,14 @@ function overviewProvenance(card) {
  * @returns 這次是否真的畫出了有證據的答案卡片。
  */
 function renderOverview(overview) {
-  const line = (text, className = "hits-note", speak = true) => {
+  const line = (text, why, className = "hits-note", speak = true) => {
     const li = document.createElement("li");
     li.className = className;
-    if (speak) li.dataset.azureAnswerBody = "";
-    li.textContent = text;
+    const voice = document.createElement("span");
+    voice.className = "overview-voice";
+    if (speak) voice.dataset.azureAnswerBody = "";
+    voice.textContent = text;
+    li.append(voice, overviewWhy(why));
     hitList.append(li);
   };
 
@@ -5642,6 +5657,7 @@ function renderOverview(overview) {
         throw new Error("記憶總覽的 evidence_unavailable 不是非負整數");
       }
       line(
+        "最近這幾件事，我記得是這樣。",
         "我目前對最近幾段有這些理解。每張下面都有畫面出處按鈕；內容可能由模型整理、審閱層修訂，或由你修正，不是我量到的確定事實：",
       );
       for (const card of overview.cards) {
@@ -5671,10 +5687,13 @@ function renderOverview(overview) {
         activity.textContent = card.activity;
         li.append(activity);
 
+        const provenance = overviewProvenance(card);
         const meta = document.createElement("p");
         meta.className = "hit-source overview-meta";
-        meta.textContent = `${when(card.segment_started_at)} · ${overviewProvenance(card)}`;
-        li.append(meta);
+        meta.textContent = `${when(card.segment_started_at)} · ${
+          { interpreter: "我的印象", reviewer: "重新想過的印象", user: "你修正過的說法" }[card.author]
+        }`;
+        li.append(meta, overviewWhy(provenance));
 
         const evidence = document.createElement("p");
         evidence.className = "hit-source overview-sources";
@@ -5696,10 +5715,11 @@ function renderOverview(overview) {
         hitList.append(li);
       }
       if (overview.truncated) {
-        line("這裡只列最近一部分有證據的理解。", "hits-note hits-more", false);
+        line("先說最近這幾件。", "這裡只列最近一部分有證據的理解。", "hits-note hits-more", false);
       }
       if (overview.evidence_unavailable > 0) {
         line(
+          "還有些印象找不到畫面，就先不說了。",
           `另外有 ${overview.evidence_unavailable} 張理解卡目前沒有可點開的畫面出處，這裡沒有列。`,
           "hits-note hits-more",
           false,
@@ -5709,18 +5729,20 @@ function renderOverview(overview) {
     }
     case "raw_only":
       line(
+        "有記下來，但還沒理清楚。",
         "我有原始紀錄，但還沒有整理成能直接回答的理解記憶；這次不會拿 OCR 片段冒充答案。",
         "hits-empty",
       );
       return false;
     case "empty":
-      line("我目前還沒有留下能回答這題的記憶。", "hits-empty");
+      line("這個我沒印象。", "我目前還沒有留下能回答這題的記憶。", "hits-empty");
       return false;
     case "evidence_missing": {
       if (!Number.isInteger(overview.cards) || overview.cards <= 0) {
         throw new Error("記憶總覽回了 evidence_missing，卻沒有遺失證據的卡片數");
       }
       line(
+        "我有點印象，但找不到畫面，所以不敢說。",
         `我有整理過的理解記憶，但最近這 ${overview.cards} 張卡片目前沒有可點開的畫面出處；這裡不把它們當成答案。`,
         "hits-empty",
       );
@@ -5951,7 +5973,19 @@ function renderHits(
     if (text) {
       const status = document.createElement("li");
       status.className = `brain-note brain-${brain.state}`;
-      status.textContent = text;
+      const overviewText = hasOverview ? {
+        search_failed: "這次沒查完。可以到設定重測，再問一次。",
+        consent_required: "這次先看這裡的紀錄。",
+        not_configured: "到設定選好幫忙回答的工具，就能接著問了。",
+      }[brain.state] : null;
+      if (overviewText) {
+        const voice = document.createElement("span");
+        voice.className = "overview-voice";
+        voice.textContent = overviewText;
+        status.append(voice, overviewWhy(text));
+      } else {
+        status.textContent = text;
+      }
       hitList.append(status);
     }
   }
