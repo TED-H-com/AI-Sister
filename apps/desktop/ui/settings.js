@@ -329,17 +329,16 @@ async function setLoginStartup(event) {
     ? "正在登錄 Windows 登入項…"
     : "正在移除 Windows 登入項…";
 
+  let startupView;
   try {
-    const startupView = await invoke("login_startup_set", { enabled });
-    loginStartupBusy = false;
-    paintLoginStartup(startupView);
+    startupView = await invoke("login_startup_set", { enabled });
   } catch (err) {
     const actionError = `變更 Windows 登入項失敗：${String(err?.message ?? err)}`;
     // set 失敗不代表它一定沒改到。再讀一次真相，不能把舊勾勾或使用者剛點的
     // 那一面當成結果；讀回也失敗才落到正式的 unreadable 態。
-    let startupView;
+    let readView;
     try {
-      startupView = await invoke("login_startup_read");
+      readView = await invoke("login_startup_read");
     } catch (readErr) {
       loginStartupBusy = false;
       paintLoginStartup(
@@ -353,15 +352,21 @@ async function setLoginStartup(event) {
     }
     loginStartupBusy = false;
     try {
-      paintLoginStartup(startupView, actionError);
+      paintLoginStartup(readView, actionError);
     } catch {
-      // 讀回來了。這一條重畫要是丟例外，不能說成讀不回。
-      try {
-        paintLoginStartup(startupView, actionError);
-      } catch {
-        // 補畫再丟也不說成讀不回。
-      }
+      // 讀回來了。重畫失敗不說成讀不回。
+      // 畫面會停在重畫寫到一半的樣子——這裡修不了那件事（painter 是同步的，
+      // 再呼叫一次會丟在同一行）。這裡只負責不要說謊。
     }
+    return;
+  }
+  loginStartupBusy = false;
+  try {
+    paintLoginStartup(startupView);
+  } catch {
+    // 登入項已經照回條寫好。重畫失敗不改口成變更失敗。
+    // 畫面會停在重畫寫到一半的樣子——這裡修不了那件事（painter 是同步的，
+    // 再呼叫一次會丟在同一行）。這裡只負責不要說謊。
   }
 }
 
@@ -2119,12 +2124,8 @@ async function setUsageConfig(event) {
       paintUsage(raw);
     } catch {
       // 設定已經存好。重畫失敗不改口成沒有存好。
-      // 失敗句那一臂也是呼叫 paintUsage；同一支要是會丟，在那裡會再丟一次，連那句話都畫不上去。
-      try {
-        paintUsage(raw);
-      } catch {
-        // 補畫再丟也不改口成沒有存好。
-      }
+      // 畫面會停在重畫寫到一半的樣子——這裡修不了那件事（painter 是同步的，
+      // 再呼叫一次會丟在同一行）。這裡只負責不要說謊。
     }
   } catch (err) {
     paintUsage(usageStatus, `用量設定沒有存好：${String(err?.message ?? err)}`);
@@ -2276,11 +2277,8 @@ async function setPersonaVoice(event) {
         paintPersonaVoice(unconfirmed);
       } catch {
         // 這一句是「無法確認」。重畫失敗不能改口成肯定的「沒有改」。
-        try {
-          paintPersonaVoice(unconfirmed);
-        } catch {
-          // 補畫再丟也不改口成沒有改。
-        }
+        // 畫面會停在重畫寫到一半的樣子——這裡修不了那件事（painter 是同步的，
+        // 再呼叫一次會丟在同一行）。這裡只負責不要說謊。
       }
       return;
     }
@@ -2291,11 +2289,8 @@ async function setPersonaVoice(event) {
       paintPersonaVoice();
     } catch {
       // 開關已經是回條上的值。重畫失敗不改口成沒有改。
-      try {
-        paintPersonaVoice();
-      } catch {
-        // 補畫再丟也不改口成沒有改。
-      }
+      // 畫面會停在重畫寫到一半的樣子——這裡修不了那件事（painter 是同步的，
+      // 再呼叫一次會丟在同一行）。這裡只負責不要說謊。
     }
   } catch (err) {
     if (revision !== personaVoiceRevision) return;
