@@ -5448,6 +5448,34 @@ console.log("93. 標記寫進去之後重畫丟例外，不可以說沒記進去
   );
 }
 
+console.log("93b. 標記時 invoke 丟出空值，仍走失敗那一臂");
+{
+  // 拒絕的理由是 null，不是 Error。null 的真假是假的；走哪一臂要看旗標。
+  const falsy = await open({
+    ask: answer({ query_id: 42, hits: [hit({ snippet: "MARK_FALSY_BODY" })] }),
+    recording_state: "recording",
+    mark_query: () => {
+      throw null;
+    },
+  });
+  await falsy.type("這題丟出空值");
+  const falsyButton = falsy.hits().querySelector(".mark-toggle");
+  const clicked = await falsy.clickElement(falsyButton);
+  check(
+    "invoke 丟出空值時仍走失敗：按鈕沒有變成已記下、狀態列說這一次標記沒記進去、而且可以再按",
+    clicked === true &&
+      falsyButton.classList.contains("on") === false &&
+      falsy.line().includes("這一次標記沒記進去") &&
+      falsyButton.disabled === false,
+    {
+      clicked,
+      on: falsyButton.classList.contains("on"),
+      disabled: falsyButton.disabled,
+      line: falsy.line(),
+    },
+  );
+}
+
 /* 上面那幾行把 `diagnose_note` 從 `calls` 濾掉了。濾掉和刪掉偵測器只差一步，
  * 所以這裡量一次那條路還在：實測這一輪會經過 started／persona／bar／answered
  * 四種。只斷言「有東西」不夠——四種裡剩一種也是「有東西」。 */

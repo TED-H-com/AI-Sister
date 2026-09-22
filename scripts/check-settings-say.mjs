@@ -4178,6 +4178,28 @@ console.log("㉚ᵒ macOS 設定已經打開時，重畫丟例外不改口成失
   );
 }
 
+console.log("㉚ᵠ 打開系統設定時 invoke 丟出空值，仍走失敗那一臂");
+{
+  // 拒絕的理由是 null，不是 Error。null 的真假是假的；走哪一臂要看旗標。
+  const falsy = await open({
+    platformAccess: {
+      platform: "macos",
+      screen_recording: false,
+      accessibility: false,
+    },
+    onPlatformAccessOpen: () => {
+      throw null;
+    },
+  });
+  const clicked = await falsy.act("[data-platform-screen-open]");
+  const sayEl = falsy.node("[data-platform-access-say]");
+  check(
+    "invoke 丟出空值時仍走失敗：說明標成失敗",
+    clicked === true && sayEl.classList.contains("bad") === true,
+    { clicked, bad: sayEl.classList.contains("bad") },
+  );
+}
+
 console.log("");
 if (failed > 0) {
   console.log(`✗ ${failed} 條沒過——設定頁在某一種情況下說了謊，或什麼都沒說。`);

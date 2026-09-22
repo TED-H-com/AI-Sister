@@ -338,6 +338,34 @@ console.log("⑦ 第三張寫進檔案之後，重畫自己丟例外");
   }
 }
 
+console.log("⑧ 寫同意書時 invoke 丟出空值，仍走失敗那一臂");
+{
+  // 拒絕的理由是 null，不是 Error。null 的真假是假的；走哪一臂要看旗標。
+  const p = await open({
+    onSet: () => {
+      throw null;
+    },
+  });
+  const readsBefore = p.invokes.filter(({ cmd }) => cmd === "consent_read").length;
+  const checkedBefore = p.boxes()[1].checked;
+  await p.toggle(1);
+  const readsNow = p.invokes.filter(({ cmd }) => cmd === "consent_read").length;
+  check(
+    "invoke 丟出空值時仍走失敗：勾勾翻回沒同意、說明標成失敗、而且多讀一次同意書",
+    p.boxes()[1].checked === checkedBefore &&
+      checkedBefore === false &&
+      p.bad() === true &&
+      readsNow === readsBefore + 1,
+    {
+      checked: p.boxes()[1].checked,
+      checkedBefore,
+      bad: p.bad(),
+      readsBefore,
+      readsNow,
+    },
+  );
+}
+
 console.log("");
 if (failed > 0) {
   console.log(`✗ ${failed} 條沒過——同意書那一頁上的勾勾，和檔案裡的不是同一件事。`);
