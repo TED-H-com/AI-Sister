@@ -337,10 +337,9 @@ async function setLoginStartup(event) {
     const actionError = `變更 Windows 登入項失敗：${String(err?.message ?? err)}`;
     // set 失敗不代表它一定沒改到。再讀一次真相，不能把舊勾勾或使用者剛點的
     // 那一面當成結果；讀回也失敗才落到正式的 unreadable 態。
+    let startupView;
     try {
-      const startupView = await invoke("login_startup_read");
-      loginStartupBusy = false;
-      paintLoginStartup(startupView, actionError);
+      startupView = await invoke("login_startup_read");
     } catch (readErr) {
       loginStartupBusy = false;
       paintLoginStartup(
@@ -350,6 +349,18 @@ async function setLoginStartup(event) {
         },
         actionError,
       );
+      return;
+    }
+    loginStartupBusy = false;
+    try {
+      paintLoginStartup(startupView, actionError);
+    } catch {
+      // 讀回來了。這一條重畫要是丟例外，不能說成讀不回。
+      try {
+        paintLoginStartup(startupView, actionError);
+      } catch {
+        // 補畫再丟也不說成讀不回。
+      }
     }
   }
 }
@@ -856,7 +867,13 @@ function paintHandsHotkey(shown, registered, reason, collided, unreadable) {
 async function setCombo(combo) {
   if (invoke === null) return;
   try {
-    paintHotkey(await invoke("hotkey_set", { combo }));
+    const state = await invoke("hotkey_set", { combo });
+    try {
+      paintHotkey(state);
+    } catch {
+      // 組合已經設定成功。重畫失敗不改口成沒設定，
+      // 也不可以讓 catch 裡的 restoreCombo 把選單寫回舊組合。
+    }
   } catch (err) {
     // **不要在這裡呼叫 `reloadHotkey()`。** 它成功的話會走 `paintHotkey`，
     // 而那件事會把底下這句錯誤蓋掉——換成一句肯定句（「搶到了。現在按…」）。
@@ -2098,7 +2115,17 @@ async function setUsageConfig(event) {
       localSessionsEnabled: el.usageLocalEnabled?.checked === true,
       localSessionsDir: el.usageLocalDir?.value ?? "",
     });
-    paintUsage(raw);
+    try {
+      paintUsage(raw);
+    } catch {
+      // 設定已經存好。重畫失敗不改口成沒有存好。
+      // 失敗句那一臂也是呼叫 paintUsage；同一支要是會丟，在那裡會再丟一次，連那句話都畫不上去。
+      try {
+        paintUsage(raw);
+      } catch {
+        // 補畫再丟也不改口成沒有存好。
+      }
+    }
   } catch (err) {
     paintUsage(usageStatus, `用量設定沒有存好：${String(err?.message ?? err)}`);
   }
@@ -2130,11 +2157,20 @@ async function installPersonaAssets(event) {
     await invoke("persona_asset_install");
     if (operation !== personaAssetOperationRevision) return;
     personaAssetOperation = null;
-    await Promise.all([refreshPersonaAssets(), refreshPersonaVoice()]);
+    try {
+      await Promise.all([refreshPersonaAssets(), refreshPersonaVoice()]);
+    } catch {
+      // 下載或修復已經完成。重畫失敗不改口成沒有完成。
+    }
   } catch (err) {
     if (operation !== personaAssetOperationRevision) return;
     personaAssetOperation = null;
-    await refreshPersonaAssets();
+    try {
+      await refreshPersonaAssets();
+    } catch {
+      // refreshPersonaAssets 的 catch 裡若 paintPersonaAssets 再丟，例外會穿出來。
+      // 這次沒有完成，失敗句仍要畫上去。
+    }
     showPersonaAssetError(
       `${repairing ? "修復" : "下載"}沒有完成：${String(err?.message ?? err)}。17 張內建角色圖仍可使用。`,
     );
@@ -2153,11 +2189,20 @@ async function cancelPersonaAssetInstall(event) {
     await invoke("persona_asset_cancel");
     if (operation !== personaAssetOperationRevision) return;
     personaAssetOperation = null;
-    await refreshPersonaAssets();
+    try {
+      await refreshPersonaAssets();
+    } catch {
+      // 取消已經完成。重畫失敗不改口成取消失敗。
+    }
   } catch (err) {
     if (operation !== personaAssetOperationRevision) return;
     personaAssetOperation = null;
-    await refreshPersonaAssets();
+    try {
+      await refreshPersonaAssets();
+    } catch {
+      // refreshPersonaAssets 的 catch 裡若 paintPersonaAssets 再丟，例外會穿出來。
+      // 這次取消失敗，失敗句仍要畫上去。
+    }
     showPersonaAssetError(`取消失敗：${String(err?.message ?? err)}。下載狀態沒有被假裝成已停止。`);
   }
 }
@@ -2175,11 +2220,20 @@ async function removePersonaAssets(event) {
     await invoke("persona_asset_remove");
     if (operation !== personaAssetOperationRevision) return;
     personaAssetOperation = null;
-    await Promise.all([refreshPersonaAssets(), refreshPersonaVoice()]);
+    try {
+      await Promise.all([refreshPersonaAssets(), refreshPersonaVoice()]);
+    } catch {
+      // 刪除已經完成。重畫失敗不落進三臂失敗句。
+    }
   } catch (err) {
     if (operation !== personaAssetOperationRevision) return;
     personaAssetOperation = null;
-    await refreshPersonaAssets();
+    try {
+      await refreshPersonaAssets();
+    } catch {
+      // refreshPersonaAssets 的 catch 裡若 paintPersonaAssets 再丟，例外會穿出來。
+      // 這次刪除的失敗句仍要畫上去。
+    }
     const reason = String(err?.message ?? err);
     if (personaAssetStatus?.phase === "available") {
       // 後端可能已精準刪完 cache，只是 config 本來就壞了、因此無法把 voice 偏好
@@ -2217,13 +2271,32 @@ async function setPersonaVoice(event) {
       personaVoiceEnabled = false;
       personaVoiceKnown = false;
       personaVoiceBusy = false;
-      paintPersonaVoice("語音設定結果缺少可辨識的開關；無法確認是否已改，請重新讀取。");
+      const unconfirmed = "語音設定結果缺少可辨識的開關；無法確認是否已改，請重新讀取。";
+      try {
+        paintPersonaVoice(unconfirmed);
+      } catch {
+        // 這一句是「無法確認」。重畫失敗不能改口成肯定的「沒有改」。
+        try {
+          paintPersonaVoice(unconfirmed);
+        } catch {
+          // 補畫再丟也不改口成沒有改。
+        }
+      }
       return;
     }
     personaVoiceEnabled = result.voice_enabled;
     personaVoiceKnown = true;
     personaVoiceBusy = false;
-    paintPersonaVoice();
+    try {
+      paintPersonaVoice();
+    } catch {
+      // 開關已經是回條上的值。重畫失敗不改口成沒有改。
+      try {
+        paintPersonaVoice();
+      } catch {
+        // 補畫再丟也不改口成沒有改。
+      }
+    }
   } catch (err) {
     if (revision !== personaVoiceRevision) return;
     personaVoiceBusy = false;
