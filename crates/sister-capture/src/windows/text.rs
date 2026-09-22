@@ -3,8 +3,8 @@
 //! focus changes, content cache or event/keystroke listener.
 use crate::assistive::{self, ReadWindow, TextEnd, TextRange, TextRect, TextRole, VisibleText};
 use crate::page_crop::{
-    BreadthWalk, Frontier, PAGE_WALK_DEPTH_CAP, PageCrop, PageNode, choose_page_crop, frontier,
-    sibling_chain,
+    BreadthWalk, Frontier, PAGE_WALK_DEPTH_CAP, PageCrop, PageNode, SiblingRead, choose_page_crop,
+    frontier, sibling_chain,
 };
 use sister_core::model::AssistiveBlock;
 use windows::{
@@ -156,6 +156,9 @@ impl FocusedText<'_> {
     /// unfinished walk does not clip. A child past the depth cap leaves the
     /// walk unfinished without erasing a depth-1 layer already observed.
     /// Zero qualified pages is not an unfinished count, and it does not clip.
+    /// A failed sibling read is not the end of that list. The elements already
+    /// read stay queued. The walk is unfinished, and a failed read of the
+    /// depth-1 list leaves that layer incomplete.
     ///
     /// Group, offscreen, monitor overlap, and the thumbnail/sidebar size floor
     /// are decided in `crate::page_crop`. The floor is not the page's real size.
@@ -166,14 +169,18 @@ impl FocusedText<'_> {
         let walker = unsafe { self.automation.ControlViewWalker() }.ok()?;
         let monitor = super::screen::focused_monitor(self.hwnd).map(|(_, bounds)| rect(bounds));
         let mut walk = BreadthWalk::seed(sibling_chain(
-            unsafe { walker.GetFirstChildElement(&self.element) }.ok(),
-            |child| unsafe { walker.GetNextSiblingElement(child) }.ok(),
+            sibling_read(unsafe { walker.GetFirstChildElement(&self.element) }),
+            |child| sibling_read(unsafe { walker.GetNextSiblingElement(child) }),
         ));
         let mut nodes = Vec::new();
         let mut elements = Vec::new();
         while let Some((current, depth)) = walk.pop_front() {
             let child_at_cap = if depth.get() >= PAGE_WALK_DEPTH_CAP {
-                Some(unsafe { walker.GetFirstChildElement(&current) }.is_ok())
+                match sibling_read(unsafe { walker.GetFirstChildElement(&current) }) {
+                    SiblingRead::Item(_) => Some(true),
+                    SiblingRead::End => Some(false),
+                    SiblingRead::Failed => None,
+                }
             } else {
                 None
             };
@@ -194,8 +201,10 @@ impl FocusedText<'_> {
                         walk.enqueue_children(
                             depth,
                             sibling_chain(
-                                unsafe { walker.GetFirstChildElement(&current) }.ok(),
-                                |child| unsafe { walker.GetNextSiblingElement(child) }.ok(),
+                                sibling_read(unsafe { walker.GetFirstChildElement(&current) }),
+                                |child| {
+                                    sibling_read(unsafe { walker.GetNextSiblingElement(child) })
+                                },
                             ),
                         );
                     }
@@ -212,6 +221,22 @@ impl FocusedText<'_> {
             }
             PageCrop::NoQualifiedPage | PageCrop::Unresolved => None,
         }
+    }
+}
+
+/// `Ok` is the next element. A success code and a null element is the end of
+/// the list: `GetNextSiblingElement` documents that null, and `windows` stores
+/// it as `Error::empty()`, whose `code()` is `S_OK`. `GetFirstChildElement`
+/// comes back through the same binding. A failed `HRESULT` is a prefix, not
+/// that end. Treating every `Err` as a failure would mark every finished list
+/// as truncated, because the measured end is also an `Err`.
+fn sibling_read(
+    read: windows::core::Result<IUIAutomationElement>,
+) -> SiblingRead<IUIAutomationElement> {
+    match read {
+        Ok(element) => SiblingRead::Item(element),
+        Err(error) if error.code().is_ok() => SiblingRead::End,
+        Err(_) => SiblingRead::Failed,
     }
 }
 

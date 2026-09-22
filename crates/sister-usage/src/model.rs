@@ -387,6 +387,22 @@ pub enum ServedFrom {
     UnreadableStore,
 }
 
+impl ServedFrom {
+    /// Variants this crate can report.
+    ///
+    /// Leaving a new variant out of this list still compiles. `served_word`
+    /// and `served_words_are_distinct_labels` have to be updated with it.
+    /// This list is a tripwire, not an exhaustiveness proof.
+    pub const ALL: [Self; 6] = [
+        Self::Disabled,
+        Self::Stopped,
+        Self::CooldownCache,
+        Self::Network,
+        Self::NetworkErrorKeptPrevious,
+        Self::UnreadableStore,
+    ];
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefreshReason {
     /// Off to on. This is not a second baseline once `baseline_complete` is set.

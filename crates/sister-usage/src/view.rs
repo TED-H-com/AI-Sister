@@ -268,6 +268,10 @@ pub fn project(
     }
 }
 
+/// Adding a `ServedFrom` variant means changing `ServedFrom::ALL` and
+/// `served_words_are_distinct_labels` in the same edit. `ALL` can omit a new
+/// variant and still compile; that list is a tripwire, not a proof this match
+/// was updated.
 fn served_word(served: ServedFrom) -> &'static str {
     match served {
         ServedFrom::Disabled => "disabled",
@@ -369,21 +373,25 @@ mod tests {
         }
     }
 
+    fn expected_served_word(served: ServedFrom) -> &'static str {
+        match served {
+            ServedFrom::Disabled => "disabled",
+            ServedFrom::Stopped => "stopped",
+            ServedFrom::CooldownCache => "cache",
+            ServedFrom::Network => "network",
+            ServedFrom::NetworkErrorKeptPrevious => "network-error",
+            ServedFrom::UnreadableStore => "unreadable",
+        }
+    }
+
     #[test]
-    fn served_words_are_six_distinct_labels() {
-        let cases = [
-            (ServedFrom::Disabled, "disabled"),
-            (ServedFrom::Stopped, "stopped"),
-            (ServedFrom::CooldownCache, "cache"),
-            (ServedFrom::Network, "network"),
-            (ServedFrom::NetworkErrorKeptPrevious, "network-error"),
-            (ServedFrom::UnreadableStore, "unreadable"),
-        ];
+    fn served_words_are_distinct_labels() {
+        let cases = ServedFrom::ALL.map(|served| (served, expected_served_word(served)));
         let produced: BTreeSet<&str> = cases
             .iter()
             .map(|(served, _)| served_word(*served))
             .collect();
-        assert_eq!(produced.len(), 6);
+        assert_eq!(produced.len(), cases.len());
         for (served, expected) in cases {
             assert_eq!(served_word(served), expected);
         }
