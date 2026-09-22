@@ -4899,6 +4899,7 @@ struct PersonaView {
     tap_lines: sister_core::config::PersonaTapLinesEnabled,
     /// 出廠永遠 false；設定頁另行明確打開以前，素材包存在也不能越過它。
     voice_enabled: sister_core::config::PersonaVoiceEnabled,
+    consent_read_aloud: sister_core::config::PersonaConsentReadAloud,
     asset_pack: PersonaAssetPackView,
 }
 
@@ -4910,6 +4911,7 @@ fn persona_view(config: &sister_core::config::Config, shell: &Shell) -> PersonaV
         motion: persona.motion_enabled(),
         tap_lines: persona.tap_lines_enabled(),
         voice_enabled: persona.voice_enabled(),
+        consent_read_aloud: persona.consent_read_aloud(),
         asset_pack: resolve_local_persona_assets(shell, persona.id),
     }
 }
@@ -5153,6 +5155,46 @@ fn persona_voice_set(
         local_tts::invalidate(&app, &shell);
         let _ = app.emit("persona-media-stop", ());
     }
+    let view = persona_view(&config, &shell);
+    let _ = app.emit("persona-changed", view.clone());
+    Ok(view)
+}
+
+// 浮窗只更新使用者這次選的欄位；其餘設定由原子 update 保留。
+#[tauri::command]
+fn persona_select(
+    id: sister_core::config::PersonaId,
+    app: tauri::AppHandle,
+    shell: tauri::State<'_, Shell>,
+) -> Result<PersonaView, String> {
+    let (config, ()) = sister_core::config::Config::update(&config_path()?, |config| {
+        let persona = config.shell.persona;
+        config.set_persona_from_page(
+            persona.visible(),
+            id,
+            persona.motion_enabled(),
+            persona.tap_lines_enabled(),
+        );
+        Ok(())
+    })
+    .map_err(|e| format!("{e:#}"))?;
+    local_tts::invalidate(&app, &shell);
+    let view = persona_view(&config, &shell);
+    let _ = app.emit("persona-changed", view.clone());
+    Ok(view)
+}
+
+#[tauri::command]
+fn persona_consent_speak_set(
+    enabled: sister_core::config::PersonaConsentReadAloud,
+    app: tauri::AppHandle,
+    shell: tauri::State<'_, Shell>,
+) -> Result<PersonaView, String> {
+    let (config, ()) = sister_core::config::Config::update(&config_path()?, |config| {
+        config.set_consent_read_aloud(enabled);
+        Ok(())
+    })
+    .map_err(|e| format!("{e:#}"))?;
     let view = persona_view(&config, &shell);
     let _ = app.emit("persona-changed", view.clone());
     Ok(view)
@@ -5797,6 +5839,7 @@ struct Settings {
     persona_id: sister_core::config::PersonaId,
     persona_motion: sister_core::config::PersonaMotionEnabled,
     persona_tap_lines: sister_core::config::PersonaTapLinesEnabled,
+    persona_consent_read_aloud: sister_core::config::PersonaConsentReadAloud,
     /// 設定檔實際的位置。給人看的——她說她存到哪，就要指得出來是哪一個檔案。
     ///
     /// **只出不進**：存檔時路徑一律由 `config_path()` 重算，不是相信視窗傳回來
@@ -5962,6 +6005,7 @@ fn settings_read() -> Result<Settings, String> {
         persona_id: c.shell.persona.id,
         persona_motion: c.shell.persona.motion_enabled(),
         persona_tap_lines: c.shell.persona.tap_lines_enabled(),
+        persona_consent_read_aloud: c.shell.persona.consent_read_aloud(),
         path: path.display().to_string(),
     })
 }
@@ -6222,6 +6266,7 @@ fn settings_write(
         c.privacy.query_log = settings.query_log;
         c.retention.frames_days = settings.frames_days;
         c.retention.text_days = settings.text_days;
+        c.set_consent_read_aloud(settings.persona_consent_read_aloud);
         c.set_persona_from_page(
             settings.persona_enabled,
             settings.persona_id,
@@ -7742,6 +7787,8 @@ fn main() {
             persona_asset_cancel,
             persona_asset_remove,
             persona_voice_set,
+            persona_select,
+            persona_consent_speak_set,
             azure_tts_read,
             azure_tts_config_set,
             azure_tts_key_set,

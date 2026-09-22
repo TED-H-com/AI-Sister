@@ -666,6 +666,19 @@ impl PersonaTapLinesEnabled {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
+pub struct PersonaConsentReadAloud(bool);
+
+impl PersonaConsentReadAloud {
+    pub const fn new(value: bool) -> Self {
+        Self(value)
+    }
+    pub const fn get(self) -> bool {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct PersonaVoiceEnabled(bool);
 
 impl PersonaVoiceEnabled {
@@ -689,10 +702,15 @@ pub struct PersonaConfig {
     pub motion: bool,
     pub tap_lines: bool,
     pub voice_enabled: bool,
+    pub consent_read_aloud: bool,
 }
 
 impl PersonaConfig {
-    /// UI 邊界不要各自從四個同型別欄位拔裸 bool；getter 直接產生不同 newtype，
+    pub const fn consent_read_aloud(self) -> PersonaConsentReadAloud {
+        PersonaConsentReadAloud::new(self.consent_read_aloud)
+    }
+
+    /// UI 邊界不要各自從同型別欄位拔裸 bool；getter 直接產生不同 newtype，
     /// 把「欄位名對、值拿錯」也變成編譯錯誤。
     pub const fn visible(self) -> PersonaVisible {
         PersonaVisible::new(self.enabled)
@@ -722,6 +740,7 @@ impl Default for PersonaConfig {
             tap_lines: true,
             // 有本機 voice 不等於同意播放；使用者仍要在設定頁另外打開聲音。
             voice_enabled: false,
+            consent_read_aloud: false,
         }
     }
 }
@@ -737,6 +756,7 @@ struct PersonaConfigOnDisk {
     motion: bool,
     tap_lines: bool,
     voice_enabled: bool,
+    consent_read_aloud: bool,
 }
 
 impl Default for PersonaConfigOnDisk {
@@ -748,6 +768,7 @@ impl Default for PersonaConfigOnDisk {
             motion: current.motion,
             tap_lines: current.tap_lines,
             voice_enabled: current.voice_enabled,
+            consent_read_aloud: current.consent_read_aloud,
         }
     }
 }
@@ -807,6 +828,7 @@ impl<'de> Deserialize<'de> for PersonaConfig {
             id,
             motion: on_disk.motion,
             tap_lines: on_disk.tap_lines,
+            consent_read_aloud: on_disk.consent_read_aloud,
             voice_enabled: !migrated_from_neutral && on_disk.voice_enabled,
         })
     }
@@ -1357,6 +1379,10 @@ impl Config {
     /// 一扇開很久的設定頁若拿舊值一起送回來，會把剛關掉的聲音重新打開。
     pub fn set_persona_voice_from_page(&mut self, enabled: PersonaVoiceEnabled) {
         self.shell.persona.voice_enabled = enabled.get();
+    }
+
+    pub fn set_consent_read_aloud(&mut self, enabled: PersonaConsentReadAloud) {
+        self.shell.persona.consent_read_aloud = enabled.get();
     }
 
     /// Azure TTS 設定頁的三格一起存，但不重建 `ShellConfig`，所以當下
@@ -2720,6 +2746,7 @@ mod tests {
                 motion: false,
                 tap_lines: false,
                 voice_enabled: true,
+                consent_read_aloud: true,
             };
             let text = toml::to_string_pretty(&config).expect("serialize persona");
             let back: Config = toml::from_str(&text).expect("deserialize persona");
@@ -2758,6 +2785,35 @@ mod tests {
     }
 
     #[test]
+    fn consent_read_aloud_defaults_off_and_round_trips_both_choices_on_disk() {
+        let legacy: Config = toml::from_str("[shell.persona]\nvoice_enabled = true\n").unwrap();
+        assert!(!legacy.shell.persona.consent_read_aloud().get());
+        let dir = std::env::temp_dir().join(format!(
+            "sister-consent-read-aloud-{}-{}",
+            std::process::id(),
+            crate::now_ms()
+        ));
+        let path = dir.join("config.toml");
+        for enabled in [true, false] {
+            Config::update(&path, |config| {
+                config.shell.persona.voice_enabled = !enabled;
+                config.set_consent_read_aloud(PersonaConsentReadAloud::new(enabled));
+                Ok(())
+            })
+            .unwrap();
+            let loaded = Config::load(&path).unwrap();
+            assert_eq!(loaded.shell.persona.consent_read_aloud, enabled);
+            assert_eq!(loaded.shell.persona.consent_read_aloud().get(), enabled);
+            assert_eq!(
+                serde_json::to_value(loaded.shell.persona.consent_read_aloud()).unwrap(),
+                serde_json::json!(enabled)
+            );
+            assert_eq!(loaded.shell.persona.voice_enabled, !enabled);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn persona_voice_has_one_typed_immediate_setter() {
         let mut config = Config::default();
         assert!(!config.shell.persona.voice_enabled);
@@ -2775,6 +2831,7 @@ mod tests {
             motion: true,
             tap_lines: false,
             voice_enabled: true,
+            consent_read_aloud: false,
         };
 
         assert!(!persona.visible().get());

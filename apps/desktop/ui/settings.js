@@ -39,6 +39,7 @@ const el = {
   personaPreviewGroup: document.querySelector("[data-persona-preview-group]"),
   personaPreviewState: document.querySelector("[data-persona-preview-state]"),
   personaTagline: document.querySelector("[data-persona-tagline]"),
+  personaConsentReadAloud: document.querySelector("[data-persona-consent-read-aloud]"),
   personaMotion: document.querySelector("[data-persona-motion]"),
   personaTapLines: document.querySelector("[data-persona-tap-lines]"),
   personaAssets: document.querySelector("[data-persona-assets]"),
@@ -2339,6 +2340,7 @@ function apply(s) {
     delete el.personaId.dataset.unrecognizedPersonaId;
     el.personaId.value = s.persona_id;
   }
+  if (el.personaConsentReadAloud) el.personaConsentReadAloud.checked = s.persona_consent_read_aloud === true;
   if (el.personaMotion) el.personaMotion.checked = s.persona_motion !== false;
   if (el.personaTapLines) el.personaTapLines.checked = s.persona_tap_lines !== false;
   el.apps.value = s.excluded_apps.join("\n");
@@ -2612,6 +2614,7 @@ function setUnreadable(on) {
     el.brainTest,
     el.personaEnabled,
     el.personaId,
+    el.personaConsentReadAloud,
     el.personaMotion,
     el.personaTapLines,
     el.apps,
@@ -3027,6 +3030,7 @@ async function save() {
         text_days: days(el.textDays, "文字"),
         persona_enabled: el.personaEnabled?.checked === true,
         persona_id: el.personaId?.value ?? "chatgpt",
+        persona_consent_read_aloud: el.personaConsentReadAloud?.checked === true,
         persona_motion: el.personaMotion?.checked === true,
         persona_tap_lines: el.personaTapLines?.checked === true,
         // `path` 不送。要寫到哪個檔案由 Rust 那邊算，不是這一頁說了算。

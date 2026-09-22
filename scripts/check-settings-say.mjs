@@ -751,6 +751,16 @@ function calls(p, command) {
   return p.invokes.filter(({ cmd }) => cmd === command);
 }
 
+console.log("A149. 設定頁同意書朗讀讀寫");
+for (const enabled of [false, true]) {
+  const p = await open({ config: { ...BASE, persona_consent_read_aloud: enabled } });
+  check(`A149 設定頁讀回朗讀 ${enabled}`, p.node("[data-persona-consent-read-aloud]").checked === enabled);
+  p.node("[data-persona-consent-read-aloud]").checked = !enabled;
+  await p.save();
+  check(`A149 設定頁保存朗讀 ${!enabled} 並重讀`, p.writes[0]?.persona_consent_read_aloud === !enabled && p.node("[data-persona-consent-read-aloud]").checked === !enabled);
+}
+if (process.env.A149_ONLY === "1") process.exit(failed ? 1 : 0);
+
 console.log("⓪ᴍ macOS 權限是原生真值、trusted click 與回到視窗後重讀");
 {
   const denied = {

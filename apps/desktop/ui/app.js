@@ -53,11 +53,17 @@ const timelineButton = document.querySelector("#timeline");
 const settingsButton = document.querySelector("#settings");
 const chromeBar = document.querySelector("[data-chrome-bar]");
 const chromeToggle = document.querySelector("[data-chrome-toggle]");
+const consentYes = document.querySelector("[data-consent-yes]");
+const consentNo = document.querySelector("[data-consent-no]");
+const firstPersona = document.querySelector("[data-persona-first-run]");
+const firstPersonaChoices = document.querySelector("[data-first-persona-choices]");
+const firstPersonaSave = document.querySelector("[data-persona-first-save]");
+const firstPersonaResult = document.querySelector("[data-persona-first-result]");
 const consentGuide = document.querySelector("[data-consent-guide]");
 const consentProgress = document.querySelector("[data-consent-progress]");
 const consentWording = document.querySelector("[data-consent-wording]");
 const consentWithout = document.querySelector("[data-consent-without]");
-const consentListen = document.querySelector("[data-consent-listen]");
+const consentListen = document.querySelector("[data-consent-speak]");
 const consentPrompt = document.querySelector("[data-consent-prompt]");
 const consentResult = document.querySelector("[data-consent-result]");
 const wakeButton = document.querySelector("[data-wake]");
@@ -1352,6 +1358,7 @@ function applyPersona(view) {
   personaMotion = view?.motion !== false;
   personaTapLines = view?.tap_lines !== false;
   personaVoiceEnabled = view?.voice_enabled === true;
+  consentReadAloud = view?.consent_read_aloud === true;
   lastSpokenLineId = null;
   localAssets = resolveLocalAssets(view?.asset_pack, activeProfile);
 
@@ -1409,14 +1416,9 @@ let localTtsPlaybackPresentation = null;
 const AZURE_AUTO_ANSWER = Object.freeze({});
 const AZURE_TRUSTED_REPLAY = Object.freeze({});
 
-/*
- * 同一顆按鈕的兩句話。第二張條文在 alpha.143 之後是 32.8–46.0 秒（中位 38.1），
- * 第四張 19.1–28.8 秒——沒有停止鍵的話，他按下去就得整段聽完，而想中斷時再按
- * 一下只會從 0 重播。`■` 是幾何符號不是 emoji：alpha.127 的 `⚙`（U+2699）在
- * Ted 的 WebView2 上整顆沒畫出來，而那一種是有 emoji 變體的。
- */
-const CONSENT_LISTEN_PLAY = "🔊 念給我聽";
-const CONSENT_LISTEN_STOP = "■ 停止朗讀";
+// 同一顆開關保留朗讀選擇；關閉也會停止當前音訊。
+const CONSENT_LISTEN_PLAY = "🔇 朗讀關閉（按下開啟）";
+const CONSENT_LISTEN_STOP = "🔊 朗讀開啟（按下關閉）";
 const CONSENT_LISTEN_FAILED = "這段本機錄音播放失敗；可以直接讀文字後回答。";
 /*
  * 停下來要說一聲。Azure 那顆從 alpha.109 就會說「Azure 朗讀已停止。」，本機答案
@@ -2086,7 +2088,7 @@ function whyNotGiggle() {
   if (state !== "idle") return "busy";
   if (paused) return "paused";
   if (masterStopPhase !== "clear") return "stopping";
-  if (consentGuideSheet !== null) return "consent_sheet";
+  if (consentGuideSheet !== null || !firstPersona.hidden) return "consent_sheet";
   if (bundledVoicePresentation !== null) return "voice_sheet";
   // 他正在打字。這時候插一句「嘻嘻」不是陪伴，是打斷。
   if (document.activeElement === askInput) return "typing";
@@ -2171,6 +2173,11 @@ function playAnswerBeat() {
 
 // ---------- 主對話裡的四張同意書 ----------
 
+let consentReadAloud = false;
+let consentSpeakBusy = false;
+let personaStartupRead = null;
+let firstPersonaBusy = false;
+let firstPersonaId = null;
 let consentGuideView = null;
 let consentGuideSheet = null;
 let consentGuideBusy = false;
@@ -2213,23 +2220,27 @@ function consentClipFor(sheet) {
 }
 
 function setConsentGuideInput(enabled) {
+  consentYes.disabled = !enabled;
+  consentNo.disabled = !enabled;
   if (!askInput || !askSend) return;
   askInput.disabled = !enabled;
   askSend.disabled = !enabled;
+  paintConsentListen();
   askInput.placeholder = consentGuideSheet
-    ? "輸入「同意」或「不同意」…"
+    ? "也可以在這裡回答…"
     : "問我一件事…";
 }
 
 function showConsentGuide(view) {
   consentGuideView = view;
+  const previousSheet = consentGuideSheet;
   consentGuideSheet = nextConsentSheet(view);
   if (consentGuideSheet === null) return false;
   const index = view.sheets.indexOf(consentGuideSheet);
   consentProgress.textContent = `同意書 ${index + 1} / 4`;
   consentWording.textContent = consentGuideSheet.wording;
   consentWithout.textContent = consentGuideSheet.without;
-  consentPrompt.textContent = "請在下面輸入「同意」或「不同意」。";
+  consentPrompt.textContent = "按「同意」或「不同意」，也可以在下方打字回答。";
   consentResult.textContent = "";
   consentResult.classList.remove("bad");
   consentGuide.hidden = false;
@@ -2239,32 +2250,89 @@ function showConsentGuide(view) {
   paintConsentListen();
   setConsentGuideInput(!consentGuideBusy);
   paintConversation();
+  if (previousSheet?.key !== consentGuideSheet.key || previousSheet?.wording !== consentGuideSheet.wording) {
+    stopPersonaMedia();
+    if (consentReadAloud) void playConsentSheet();
+  }
   return true;
 }
+
+function showFirstPersona() {
+  consentGuideSheet = null;
+  consentGuide.hidden = true;
+  firstPersona.hidden = false;
+  hitList.hidden = true;
+  document.body.classList.add("has-consent-guide");
+  setConsentGuideInput(false);
+  paintConversation();
+  if (firstPersonaId !== null) return;
+  const catalog = globalThis.__AI_SISTER_PERSONA_CATALOG__;
+  if (catalog?.schema !== "ai-sister/persona-catalog/v1" || catalog.personas?.length !== 17 ||
+      catalog.personas.some((item) => !profileFor(item.id) || item.portrait !== `./personas/${item.id}.webp`)) {
+    firstPersonaResult.textContent = "角色清單讀不到。請重新開啟 AI-Sister。";
+    firstPersonaSave.disabled = true;
+    return;
+  }
+  firstPersonaId = activeProfile.id;
+  const choices = catalog.personas.map((persona) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("aria-label", persona.alias);
+    button.setAttribute("aria-pressed", String(persona.id === firstPersonaId));
+    const image = document.createElement("img");
+    image.src = persona.portrait;
+    image.alt = "";
+    const name = document.createElement("span");
+    name.textContent = persona.alias;
+    button.append(image, name);
+    button.addEventListener("click", () => {
+      if (firstPersonaBusy) return;
+      firstPersonaId = persona.id;
+      for (const choice of choices) choice.setAttribute("aria-pressed", String(choice === button));
+    });
+    return button;
+  });
+  firstPersonaChoices.replaceChildren(...choices);
+}
+
+async function saveFirstPersona() {
+  if (invoke === null || firstPersonaBusy || firstPersonaId === null) return;
+  firstPersonaBusy = true;
+  firstPersonaSave.disabled = true;
+  firstPersonaResult.textContent = "正在保存…";
+  try {
+    const view = await invoke("persona_select", { id: firstPersonaId });
+    if (view?.id !== firstPersonaId || !applyPersona(view)) throw new Error("沒有讀回所選角色");
+    firstPersona.hidden = true;
+    showConsentGuide(consentGuideView);
+  } catch (error) {
+    firstPersonaResult.textContent = `角色沒有保存：${String(error?.message ?? error)}`;
+  } finally {
+    firstPersonaBusy = false;
+    firstPersonaSave.disabled = false;
+  }
+}
+firstPersonaSave?.addEventListener("click", () => void saveFirstPersona());
 
 /** 我記下的那一代還在不在。見 `consentReadingRequest`。 */
 function consentIsReading() {
   return consentReadingRequest !== null && consentReadingRequest === voiceRequest;
 }
 
-/**
- * 那顆朗讀鍵長什麼樣，只有這一支說了算。
- *
- * 以前同一條規則抄在兩個地方（換角色時一份、換條文時一份），兩份不同步不會有
- * 任何畫面上的症狀——而現在它多了第三個狀態（正在念），抄三份必然會漂。
- */
+/** 開關記住使用者的選擇；缺少當張錄音只停用按鈕。 */
 function paintConsentListen() {
   if (!consentListen || consentGuideSheet === null) return;
   const clip = consentClipFor(consentGuideSheet);
   const reading = consentIsReading();
-  consentListen.disabled = clip === null;
-  consentListen.textContent = reading ? CONSENT_LISTEN_STOP : CONSENT_LISTEN_PLAY;
+  consentListen.disabled = clip === null || consentSpeakBusy || consentGuideBusy;
+  consentListen.setAttribute("aria-pressed", String(consentReadAloud));
+  consentListen.textContent = consentReadAloud ? CONSENT_LISTEN_STOP : CONSENT_LISTEN_PLAY;
   consentListen.title =
     clip === null
       ? "這一版條文沒有相符的本機錄音"
-      : reading
-        ? "停止這一段朗讀"
-        : "用目前角色的聲音朗讀";
+      : consentReadAloud
+        ? reading ? "關閉並停止這一段朗讀" : "關閉條文朗讀"
+        : "開啟後逐張朗讀條文";
 }
 
 function hideConsentGuide() {
@@ -2317,6 +2385,11 @@ async function handleConsentReply() {
     return;
   }
 
+  await applyConsentAnswer(granted);
+}
+
+async function applyConsentAnswer(granted) {
+  if (consentGuideSheet === null || consentGuideBusy || invoke === null || consentSpeakBusy) return;
   stopPersonaMedia();
   const answeredKey = consentGuideSheet.key;
   consentGuideBusy = true;
@@ -2352,9 +2425,13 @@ async function readConsentGuide() {
   if (invoke === null) return;
   setConsentGuideInput(false);
   try {
+    await personaStartupRead;
     const view = usableConsentView(await invoke("consent_read"));
     if (view === null) throw new Error("沒有讀回完整的四張同意書");
-    if (!showConsentGuide(view)) hideConsentGuide();
+    if (view.sheets.every((sheet) => !sheet.reviewed)) {
+      consentGuideView = view;
+      showFirstPersona();
+    } else if (!showConsentGuide(view)) hideConsentGuide();
   } catch (error) {
     hideConsentGuide();
     noticeAboutSomethingElse(`同意書讀不到；這一輪不會替你做任何授權：${String(error?.message ?? error)}`);
@@ -2362,16 +2439,33 @@ async function readConsentGuide() {
   }
 }
 
-async function playConsentSheet(event) {
-  if (event?.isTrusted !== true || consentGuideSheet === null || consentGuideBusy) return;
-  // 正在念的時候，這一下是**停止**。trusted 檢查留在上面那一行，停止也走同一道
-  // 閘門——這顆按鈕只有一條路進來，不替「頁面上的腳本」另開一個分支。
-  if (consentIsReading()) {
-    stopPersonaMedia();
-    consentResult.textContent = CONSENT_LISTEN_STOPPED;
-    consentResult.classList.remove("bad");
-    return;
+async function toggleConsentSpeak(event) {
+  if (event?.isTrusted !== true || consentGuideSheet === null || consentGuideBusy || consentSpeakBusy ||
+      consentClipFor(consentGuideSheet) === null || invoke === null) return;
+  const enabled = !consentReadAloud;
+  stopPersonaMedia();
+  consentSpeakBusy = true;
+  setConsentGuideInput(false);
+  try {
+    const view = await invoke("persona_consent_speak_set", { enabled });
+    if (view?.consent_read_aloud !== enabled) throw new Error("沒有讀回朗讀設定");
+    consentReadAloud = enabled;
+    if (!enabled) {
+      consentResult.textContent = CONSENT_LISTEN_STOPPED;
+      consentResult.classList.remove("bad");
+    }
+  } catch (error) {
+    consentResult.textContent = `朗讀設定沒有保存：${String(error?.message ?? error)}`;
+    consentResult.classList.add("bad");
+  } finally {
+    consentSpeakBusy = false;
+    setConsentGuideInput(true);
   }
+  if (enabled && consentReadAloud) await playConsentSheet();
+}
+
+async function playConsentSheet() {
+  if (!consentReadAloud || consentGuideSheet === null || consentGuideBusy) return;
   const clip = consentClipFor(consentGuideSheet);
   if (
     clip === null ||
@@ -2459,7 +2553,9 @@ async function playConsentSheet(event) {
   }
 }
 
-consentListen?.addEventListener("click", (event) => void playConsentSheet(event));
+consentListen?.addEventListener("click", (event) => void toggleConsentSpeak(event));
+consentYes?.addEventListener("click", () => void applyConsentAnswer(true));
+consentNo?.addEventListener("click", () => void applyConsentAnswer(false));
 
 /*
  * 把她拖來拖去。
@@ -2802,7 +2898,7 @@ if (invoke !== null) {
 function readPersona() {
   if (invoke === null) return;
   const revisionWhenStarted = personaRevision;
-  invoke("persona_read").then(
+  return invoke("persona_read").then(
     (view) => {
       // 設定頁事件若先到，它代表比這次 initial read 更新的設定；舊回應不能蓋回去。
       if (personaRevision === revisionWhenStarted) {
@@ -3101,7 +3197,7 @@ function paintConversation() {
 
   // 同意書是使用者此刻正在回答的問題；這四張沒走完以前，不把守門員或 URL
   // 題疊在同一顆氣泡裡。它們都沒有消失，完成後下一輪會照原狀回來。
-  if (consentGuideSheet !== null) {
+  if (consentGuideSheet !== null || !firstPersona.hidden) {
     if (gatekeeperClaimsConversation()) utterance.hidden = true;
     showUrlPolicy(false);
     return;
@@ -6257,6 +6353,7 @@ const SLOW_MS = 4000;
 let asking = 0;
 
 async function ask(event = null) {
+  if (!firstPersona.hidden) return;
   const question = askInput.value.trim();
   if (question === "") return;
   if (consentGuideSheet !== null) {
@@ -6499,7 +6596,7 @@ seedSwayPhase();
 applyPersona({ id: "chatgpt", enabled: true, motion: true, tap_lines: true });
 paintPin();
 // 只讀本機 config；失敗就留在 HTML 已經畫好的 ChatGPT 內建角色圖。
-readPersona();
+personaStartupRead = readPersona();
 // 只讀開關／region／credential 四態／第四張同意書，不會合成，也不會連 Azure。
 readAzureTts();
 readLocalTts();

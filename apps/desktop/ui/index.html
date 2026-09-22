@@ -148,16 +148,24 @@
       <aside class="gate-debug" data-gate-debug hidden></aside>
       <!-- 文字回答收進同一顆指向角色的氣泡；角色本身維持透明全身大小。 -->
       <section class="answer-bubble" aria-label="AI-Sister 的回答">
+        <section class="persona-first-run" data-persona-first-run hidden aria-label="選擇角色">
+          <p>先選一位陪你。</p>
+          <div class="first-persona-choices" data-first-persona-choices></div>
+          <button type="button" data-persona-first-save>就她</button>
+          <p data-persona-first-result aria-live="polite"></p>
+        </section>
         <section class="consent-guide" data-consent-guide hidden>
           <p class="consent-progress" data-consent-progress></p>
           <p class="consent-wording" data-consent-wording></p>
           <p class="consent-without" data-consent-without></p>
-          <button class="consent-listen" data-consent-listen type="button">
-            🔊 念給我聽
+          <button class="consent-listen" data-consent-speak type="button" aria-pressed="false">
+            🔇 朗讀關閉
           </button>
           <p class="consent-prompt" data-consent-prompt>
-            請在下面輸入「同意」或「不同意」。
+            按「同意」或「不同意」，也可以在下方打字回答。
           </p>
+          <button type="button" data-consent-yes>同意</button>
+          <button type="button" data-consent-no>不同意</button>
           <p class="consent-result" data-consent-result aria-live="polite"></p>
         </section>
         <aside class="hands-log" data-hands-log aria-label="行動紀錄"></aside>
@@ -205,6 +213,7 @@
     </footer>
 
     <!-- 純資料；不存在或不合契約時 app.js 仍只顯示 bundled WebP。 -->
+    <script src="./personas/catalog.js"></script>
     <script src="./persona-reels/manifest.js"></script>
     <script src="./persona-voices/v1/manifest.js"></script>
     <script src="./persona-consent-voices/v1/manifest.js"></script>

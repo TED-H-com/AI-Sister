@@ -1491,3 +1491,10 @@ body.has-consent-guide .answer-bubble {
   margin: 0 0 2px;
   opacity: 0.8;
 }
+
+.persona-first-run[hidden] { display: none; }
+.persona-first-run { padding: 12px; max-height: 290px; overflow-y: auto; }
+.first-persona-choices { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.first-persona-choices button { display: flex; flex-direction: column; align-items: center; padding: 4px; }
+.first-persona-choices img { width: 58px; height: 68px; object-fit: contain; }
+.first-persona-choices button[aria-pressed="true"] { outline: 2px solid var(--letter-accent, #4b8071); }
