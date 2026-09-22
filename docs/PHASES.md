@@ -138,8 +138,7 @@ binary 跑過，並證明既有資料與 migration 都不丟。自動 updater �
   所以組成是主因不是全部。**前面那兩個比較（長度、逗號位置）比的是兩個不共用
   字集的東西**，這句話要跟著它們一起讀。
 - **同意書朗讀是另一份原子素材**：17 位角色各四段，共 68 段 bundled Ogg；不併入 544 段
-  日常 trigger。逐字稿必須等於 native `Sheet::wording()`，整份 manifest 驗過才可由當張
-  「念給我聽」的 trusted click 播放；開場不 autoplay，條文改版而錄音未換時保持靜音。
+  日常 trigger。整份 manifest 驗過才可啟用；同意書朗讀出廠關閉；使用者以一次 trusted click 開啟後，每張條文各播放一次目前角色的本機 bundled Ogg，不必逐張再按。關閉立即停止，選擇隨 config 保存至重開後；不借 Azure 或 `localService`，逐字稿與 native 當下條文不符就停用當張朗讀。
 
 ### CLI 大腦登入合約（alpha.123 起）
 

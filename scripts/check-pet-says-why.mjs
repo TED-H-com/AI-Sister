@@ -353,6 +353,7 @@ async function open(
     beforeListenerRegistered = null,
     browserOnly = false,
     autoFirstPersona = true,
+    alterCatalog = null,
     consentVoices = null,
     systemVoices = null,
     holdPlay = false,
@@ -532,6 +533,7 @@ async function open(
   else globalThis.__TAURI__ = tauri;
 
   await loader(read(join(UI, "personas/catalog.js")))();
+  if (alterCatalog) globalThis.__AI_SISTER_PERSONA_CATALOG__ = alterCatalog(globalThis.__AI_SISTER_PERSONA_CATALOG__);
   const nonsense = watchNonsense();
   await boot();
   await tick();
@@ -676,6 +678,28 @@ console.log("A149. 首次選角、同意按鈕、保存的朗讀開關");
   await selected.clickElement(selected.node("[data-first-persona-choices]").children[1]);
   await selected.clickElement(selected.node("[data-persona-first-save]"));
   check("A149 就她保存所點角色後才顯示同意書", selected.invokes.some(({cmd,arg}) => cmd === "persona_select" && arg.id === "claude") && selected.node("[data-persona-first-run]").hidden && !selected.consentGuide().hidden);
+  for (const [label, alterCatalog] of [
+    ["missing", () => null],
+    ["schema", (catalog) => ({ ...catalog, schema: "wrong" })],
+    ["count", (catalog) => ({ ...catalog, personas: catalog.personas.slice(1) })],
+    ["portrait", (catalog) => ({ ...catalog, personas: catalog.personas.map((p, i) => i ? p : { ...p, portrait: "wrong.webp" }) })],
+  ]) {
+    const next = fresh(); next.sheets[0].reviewed = true;
+    const fallback = await open({ consent_read: fresh(), consent_set: next }, { autoFirstPersona: false, alterCatalog });
+    check(`A149 catalog ${label} 失效跳過選角、預設角色可回答第一張`, fallback.node("[data-persona-first-run]").hidden && !fallback.consentGuide().hidden && !fallback.input().disabled && fallback.consentProgress().includes("1 / 4") && fallback.node("[data-avatar]").dataset.persona === "chatgpt" && !fallback.calls.includes("persona_select"));
+    await fallback.type("不同意");
+    check(`A149 catalog ${label} 失效仍能保存回答並走到第二張`, fallback.invokes.some(({cmd,arg}) => cmd === "consent_set" && arg.granted === false) && fallback.consentProgress().includes("2 / 4"));
+  }
+  const wrongId = await open({ consent_read: fresh(), persona_select: { id: "gemini" } }, { autoFirstPersona: false });
+  await wrongId.clickElement(wrongId.node("[data-persona-first-save]"));
+  check("A149 回傳別人角色留在選角並說明沒有讀回所選角色", !wrongId.node("[data-persona-first-run]").hidden && wrongId.consentGuide().hidden && !wrongId.node("[data-persona-first-save]").disabled && wrongId.node("[data-persona-first-result]").textContent.includes("沒有讀回所選角色") && wrongId.node("[data-avatar]").dataset.persona === "chatgpt");
+  // 第一層 ID 相等之後，第二層 applyPersona 只會對未知 ID 回 false。
+  // JSON 的穩定 ID 無法獨立走到這條；用 getter 做 seam 故障注入，不冒充 native JSON。
+  let idReads = 0;
+  const rejectedView = { get id() { return ++idReads === 1 ? "chatgpt" : "unknown-persona"; } };
+  const unapplied = await open({ consent_read: fresh(), persona_select: rejectedView }, { autoFirstPersona: false });
+  await unapplied.clickElement(unapplied.node("[data-persona-first-save]"));
+  check("A149 回傳角色無法套用留在選角並說明沒有讀回所選角色", !unapplied.node("[data-persona-first-run]").hidden && unapplied.consentGuide().hidden && !unapplied.node("[data-persona-first-save]").disabled && unapplied.node("[data-persona-first-result]").textContent.includes("沒有讀回所選角色"));
   const returning = await open({ consent_read: consentView([true,false,false,false], [false,false,false,false]) }, { autoFirstPersona: false });
   check("A149 已回答過的人不再選角", returning.node("[data-persona-first-run]").hidden && !returning.consentGuide().hidden && !returning.calls.includes("persona_select"));
   for (const granted of [true, false]) {
@@ -724,6 +748,17 @@ console.log("A149. 首次選角、同意按鈕、保存的朗讀開關");
   const failedToggle = await open({consent_read: fresh(), persona_consent_speak_set: new Error("disk full")}, {consentVoices: consentVoiceManifest()});
   await failedToggle.clickElement(failedToggle.consentListen());
   check("A149 開啟保存失敗保留關閉、不播放且可重按", failedToggle.audioPlays() === 0 && failedToggle.consentListen().dataset["aria-pressed"] === "false" && !failedToggle.consentListen().disabled && failedToggle.consentResult().includes("沒有保存"));
+  for (const enabled of [false, true]) {
+    const mismatch = await open({ consent_read: fresh(), persona_read: { id: "chatgpt", consent_read_aloud: enabled }, persona_consent_speak_set: { id: "chatgpt", consent_read_aloud: enabled } }, { consentVoices: consentVoiceManifest() });
+    const playsBeforeMismatch = mismatch.audioPlays();
+    await mismatch.clickElement(mismatch.consentListen());
+    check(`A149 朗讀回傳不符 ${enabled} 保留原開關並說明沒有讀回朗讀設定`, mismatch.consentListen().dataset["aria-pressed"] === String(enabled) && !mismatch.consentListen().disabled && mismatch.consentResult().includes("沒有讀回朗讀設定") && mismatch.audioPlays() === playsBeforeMismatch, { pressed: mismatch.consentListen().dataset["aria-pressed"], result: mismatch.consentResult(), playsBeforeMismatch, plays: mismatch.audioPlays() });
+  }
+  const ended = await open({ consent_read: fresh(), persona_fixed_voice_admit: {presentation_id: "a149-ended"} }, { consentVoices: consentVoiceManifest() });
+  await ended.clickElement(ended.consentListen());
+  ended.finishAudio();
+  await ended.clickElement(ended.consentListen());
+  check("A149 已播完再關閉只說關閉、不宣稱停止朗讀", ended.audioPlays() === 1 && ended.consentResult() === "條文朗讀已關閉。" && ended.consentListen().dataset["aria-pressed"] === "false");
 }
 if (process.env.A149_ONLY === "1") process.exit(failed ? 1 : 0);
 
@@ -4733,8 +4768,9 @@ console.log("88. 三顆播放鍵的停止規則一致，而下一顆躲不掉這
 
 console.log("89. 條文錄音播不出來的時候，不准改用系統聲音把條文念掉");
 {
-  // SPEC：「同意書朗讀也只接受當張『念給我聽』的 trusted click，不 autoplay、
-  // 不借 Azure 或 `localService`」。前半段 §85 守著，**後半段沒有人守**——而
+  // SPEC：同意書朗讀出廠關閉，一次 trusted click 開啟後每張各播一次，不必逐張再按；
+  // 關閉立即停止，選擇隨 config 保存至重開後，逐字稿不符就停用當張。
+  // 不借 Azure 或 `localService`；開關由 A149 守著，這一節守不借其他聲音。
   // 隔壁那條路（角色點擊台詞）**故意**有 localService fallback（見真機清單
   // alpha.108 那一項：「single voice read 回 null／cache stale／audio play 拒絕，
   // 確認同一次 trusted click 會嘗試 localService fallback」）。兩條路現在是分開

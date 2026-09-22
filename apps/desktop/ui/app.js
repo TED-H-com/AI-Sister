@@ -1720,6 +1720,7 @@ function clearPlaybackStoppedLines() {
   if (
     consentResult &&
     (consentSaid === CONSENT_LISTEN_STOPPED ||
+      consentSaid === "條文朗讀已關閉。" ||
       consentSaid === CONSENT_LISTEN_FAILED ||
       consentSaid.startsWith("現在不能朗讀："))
   ) {
@@ -2269,8 +2270,8 @@ function showFirstPersona() {
   const catalog = globalThis.__AI_SISTER_PERSONA_CATALOG__;
   if (catalog?.schema !== "ai-sister/persona-catalog/v1" || catalog.personas?.length !== 17 ||
       catalog.personas.some((item) => !profileFor(item.id) || item.portrait !== `./personas/${item.id}.webp`)) {
-    firstPersonaResult.textContent = "角色清單讀不到。請重新開啟 AI-Sister。";
-    firstPersonaSave.disabled = true;
+    firstPersona.hidden = true;
+    showConsentGuide(consentGuideView);
     return;
   }
   firstPersonaId = activeProfile.id;
@@ -2443,6 +2444,7 @@ async function toggleConsentSpeak(event) {
   if (event?.isTrusted !== true || consentGuideSheet === null || consentGuideBusy || consentSpeakBusy ||
       consentClipFor(consentGuideSheet) === null || invoke === null) return;
   const enabled = !consentReadAloud;
+  const wasReading = consentIsReading();
   stopPersonaMedia();
   consentSpeakBusy = true;
   setConsentGuideInput(false);
@@ -2451,7 +2453,7 @@ async function toggleConsentSpeak(event) {
     if (view?.consent_read_aloud !== enabled) throw new Error("沒有讀回朗讀設定");
     consentReadAloud = enabled;
     if (!enabled) {
-      consentResult.textContent = CONSENT_LISTEN_STOPPED;
+      consentResult.textContent = wasReading ? CONSENT_LISTEN_STOPPED : "條文朗讀已關閉。";
       consentResult.classList.remove("bad");
     }
   } catch (error) {

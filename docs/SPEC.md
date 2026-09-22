@@ -313,9 +313,8 @@ ChatGPT 的三分類（否定事實/否定時機/接受）由 Reviewer 從對話
   點角色 → 一句本機 deterministic tap-line，必須來自 trusted 操作、只播放 bundled Ogg，
   不叫 CLI、不連網。輸入框的每個文字問題都走目前選定的 CLI 與本機記憶路徑，包括
   早安、晚安等短句；不得用固定台詞繞過 CLI 或冒充動態回答。
-  同意書朗讀也只接受當張「念給我聽」的 trusted click，不 autoplay、不借 Azure 或
-  `localService`；使用者仍在原輸入框以文字回答。同一顆鍵在念的時候是停止鍵，不是重播
-  鍵——第二張條文 32.8–46.0 秒，重播會讓想中斷的那一下反而從 0 再來一次。
+  同意書朗讀出廠關閉；使用者以一次 trusted click 開啟後，每張條文各播放一次目前角色的本機 bundled Ogg，不必逐張再按。關閉立即停止，選擇隨 config 保存至重開後；不借 Azure 或 `localService`，逐字稿與 native 當下條文不符就停用當張朗讀。
+  使用者可按「同意」或「不同意」，也可在原輸入框以文字回答。
   聲音另行 opt-in。動態答案的本機朗讀只能由使用者按「用本機聲音朗讀」後交給 WebView
   明確標成 `localService` 的中文系統 voice；那顆鍵在念的時候同樣是停止鍵。三顆播放鍵
   （同意書條文、本機答案、Azure 答案）的規則一致：第二下停止，不是重播。alpha.110 另有預設關閉的 Azure 繁中新答案
@@ -896,7 +895,7 @@ AI-Sister 不提供、不保證這份免費額度，也不把它當費用上限�
 | Persona transport | root workspace 的 **`sister-assets`**；預設 feature 集合不含 `download`，desktop 才明確啟用 | API 不接受 renderer 傳入 URL／header／body／persona 或 memory；Persona 的 fixed GET 與 cache contract 見 §11.9 |
 | Azure TTS transport | root workspace 的 **`sister-tts`**；預設 feature 集合不含 `azure`，desktop 才明確啟用 | 預設關閉；第四張 consent、Credential Manager key 與 typed config 齊全時只自動讀最新新答案，另有 trusted replay；三個 fixed region POST、payload、cache 與 cancel 邊界見 §11.10 |
 | Schema | Rust serde DTO + 前端封閉集合檢查 | 沒有 Zod／codegen build step |
-| Persona assets | 17 人本機 catalog + bundled workplace 分層 rig（active-only decode）+ WebP fail-safe（ChatGPT 預設）+ 每人基本 8／擴充 24 的日常語音 + 每人四段同意書朗讀 | 402 張 selected PNG = 35,140,885 bytes；544 段日常 Ogg = 8,895,060 bytes，另有 68 段 consent Ogg（5,932,965 bytes）與 340 段 banter Ogg（2,249,872 bytes，alpha.132 起，唯一不必先被點到就會出聲的一包）；逐檔 pin text/path/bytes/hash/duration/rights/loudness（alpha.137 起每段帶 integrated LUFS 與 true peak，CI 重新解碼對回 manifest；alpha.138 起 CI 另量頭尾空白，每包至少 99% 兩端在 300 ms 以內；alpha.139 起台詞以外的音節一律重錄不剪，判準是兩個訓練資料不同的 ASR 都聽到台詞沒有的字；alpha.140 起換上去的那一段另要過一條相對判準——兩個引擎各自聽到的都不准比被換掉的那一段離台詞更遠——並拿掉兩條從隔壁 pack 搬來的絕對門檻（CER、聲紋分數））；WebView 只從同源 bundled path 播放；recorder/core 保持零網路 |
+| Persona assets | 17 人本機 catalog + bundled workplace 分層 rig（active-only decode）+ WebP fail-safe（ChatGPT 預設）+ 每人基本 8／擴充 24 的日常語音 + 每人四段同意書朗讀 | 402 張 selected PNG = 35,140,885 bytes；544 段日常 Ogg = 8,895,060 bytes，另有 68 段 consent Ogg（5,932,965 bytes）與 340 段 banter Ogg（2,249,872 bytes，alpha.132 起，唯一在聲音開啟後、不必先點角色或朗讀開關就能觸發的 bundled 語音包）；逐檔 pin text/path/bytes/hash/duration/rights/loudness（alpha.137 起每段帶 integrated LUFS 與 true peak，CI 重新解碼對回 manifest；alpha.138 起 CI 另量頭尾空白，每包至少 99% 兩端在 300 ms 以內；alpha.139 起台詞以外的音節一律重錄不剪，判準是兩個訓練資料不同的 ASR 都聽到台詞沒有的字；alpha.140 起換上去的那一段另要過一條相對判準——兩個引擎各自聽到的都不准比被換掉的那一段離台詞更遠——並拿掉兩條從隔壁 pack 搬來的絕對門檻（CER、聲紋分數））；WebView 只從同源 bundled path 播放；recorder/core 保持零網路 |
 | hands 元件（Phase 6+） | Agent S3（Apache-2.0）/ UFO²（MIT）/ OmniParser v3 weights（MIT，避開舊 AGPL detector） | 「手」已商品化：用組的，不自己寫 grounding |
 | 參考不引用 | Screenpipe（2026-06 起自訂商業授權，僅參考架構；MIT fork point 在舊版）；Everywhere（BUSL，僅 MCP/API interop） | license 判定見 research/landscape.md |
 
