@@ -2549,9 +2549,14 @@ const INSTALLED_SUMMARY =
 const AVAILABLE_SUMMARY =
   "17 張內建角色圖已可使用；四姊妹的額外固定錄音尚未下載。記錄、搜尋、證據、刪除與匯出不受影響。";
 
-// 預設每次命中都丟。這三支 painter 是同步的，真實的重畫失敗會每次丟在同一行；
-// 「只丟一次」不是那個世界，要的話必須明寫 { once: true }。disarm() 之後恢復正常寫入。
-function throwOnText(el, needle, { afterWrite = false, once = false, message = "repaint failed" } = {}) {
+// 每次命中都丟。這三支 painter 是同步的（`await` 0 處、`invoke` 0 處），第一次丟
+// 到第二次之間沒有交錯點，真實的重畫失敗會每次丟在同一行。
+//
+// **這裡沒有「只丟一次」的選項，是故意的。** a147 R7 有過一版：產品在 catch 裡
+// 再呼叫一次同一支 painter「補畫」，而那段補畫只在「剛好只丟一次」的夾具底下會
+// 成功。拿掉補畫、和把夾具改成每次都丟，紅的是**同樣那五條**正面斷言——
+// 兩者是同一根槓桿。留一個沒有人用的 once 開關，就是把那扇門留著。
+function throwOnText(el, needle, { afterWrite = false, message = "repaint failed" } = {}) {
   const original = Object.getOwnPropertyDescriptor(el, "textContent");
   let thrown = false;
   let armed = true;
@@ -2562,7 +2567,7 @@ function throwOnText(el, needle, { afterWrite = false, once = false, message = "
     },
     set(value) {
       const text = String(value);
-      if (armed && text.includes(needle) && (!once || !thrown)) {
+      if (armed && text.includes(needle)) {
         thrown = true;
         if (afterWrite) original.set.call(el, value);
         throw new Error(message);
