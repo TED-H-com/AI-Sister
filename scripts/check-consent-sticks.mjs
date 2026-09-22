@@ -52,11 +52,12 @@ function view(granted = [true, false, true, true]) {
 
 const tick = () => new Promise((r) => setTimeout(r, 20));
 
-async function open({ onRead, onSet } = {}) {
+async function open({ onRead, onSet, granted = [true, false, true, true] } = {}) {
   // 開場的 `hidden` 照 onboarding.html、HTML 上沒有的選擇器當場算前提不成立。
   // 自己寫 `nodes.get(sel) ?? fakeEl()` 的版本會替一顆被刪掉的按鈕生一個出來。
   const node = domOf(HTML);
-  let state = [true, false, true, true];
+  let state = [...granted];
+  const invokes = [];
 
   globalThis.document = fakeDocument(node);
   globalThis.location = { search: "" };
@@ -66,6 +67,7 @@ async function open({ onRead, onSet } = {}) {
   globalThis.__TAURI__ = {
     core: {
       invoke: async (cmd, arg) => {
+        invokes.push({ cmd, arg });
         if (cmd === "consent_read") {
           if (onRead) return onRead(state);
           return view(state);
@@ -87,6 +89,7 @@ async function open({ onRead, onSet } = {}) {
   return {
     node,
     nonsense,
+    invokes,
     disk: () => state,
     say: () => node("[data-say]").textContent,
     bad: () => node("[data-say]").classList.contains("bad"),
@@ -102,6 +105,35 @@ async function open({ onRead, onSet } = {}) {
       for (const fn of box.handlers.change ?? []) fn();
       await tick();
       return box;
+    },
+  };
+}
+
+// 每次命中都丟。`paint` 是同步的，第一次丟到第二次之間沒有交錯點。
+// 這裡沒有「只丟一次」的開關：補畫只在剛好只丟一次的夾具底下看起來會動。
+function throwOnText(el, needle, { afterWrite = false, message = "repaint failed" } = {}) {
+  const original = Object.getOwnPropertyDescriptor(el, "textContent");
+  let thrown = false;
+  let armed = true;
+  Object.defineProperty(el, "textContent", {
+    configurable: true,
+    get() {
+      return original.get.call(el);
+    },
+    set(value) {
+      const text = String(value);
+      if (armed && text.includes(needle)) {
+        thrown = true;
+        if (afterWrite) original.set.call(el, value);
+        throw new Error(message);
+      }
+      original.set.call(el, value);
+    },
+  });
+  return {
+    seen: () => thrown,
+    disarm() {
+      armed = false;
     },
   };
 }
@@ -232,6 +264,78 @@ console.log("⑥ 反方向：取消第四張來停 Azure，兩邊都失敗");
     p.boxes()[3].checked,
   );
   check("而且畫面上有話說", p.say().includes("寫不進去"), p.say());
+}
+
+console.log("⑦ 第三張寫進檔案之後，重畫自己丟例外");
+{
+  const rejections = [];
+  const noteRejection = (reason) => {
+    rejections.push(reason);
+  };
+  process.on("unhandledRejection", noteRejection);
+  try {
+    const p = await open({ granted: [true, false, false, false] });
+    const readsBefore = p.invokes.filter(({ cmd }) => cmd === "consent_read").length;
+    check(
+      "前提：開場只讀過一次，第三張還沒同意留截圖",
+      readsBefore === 1 && p.boxes()[2].checked === false && p.disk()[2] === false,
+      { readsBefore, checked: p.boxes()[2].checked, disk: p.disk() },
+    );
+    const seen = throwOnText(p.node("[data-path]"), "consent.toml");
+    const before = rejections.length;
+    await p.toggle(2);
+    const say = p.say();
+    const box = p.boxes()[2];
+    const readsNow = p.invokes.filter(({ cmd }) => cmd === "consent_read").length;
+    const sets = p.invokes.filter(({ cmd }) => cmd === "consent_set");
+    check(
+      "前提：第三張有寫進檔案，而且重畫有丟",
+      seen.seen() === true &&
+        sets.length === 1 &&
+        sets[0].arg?.key === "frame-storage" &&
+        sets[0].arg?.granted === true &&
+        p.disk()[2] === true,
+      { seen: seen.seen(), sets, disk: p.disk(), say },
+    );
+    check(
+      "第三張同意已經寫進檔案時，重畫丟例外也不把勾勾翻回沒同意",
+      box.checked === true && box.disabled !== true,
+      { checked: box.checked, disabled: box.disabled, disk: p.disk() },
+    );
+    check(
+      "這時不把重畫例外說成沒存進去，說明也不標成失敗",
+      !say.includes("repaint failed") && !say.includes("讀不出來") && p.bad() === false,
+      { say, bad: p.bad() },
+    );
+    check(
+      "重畫失敗不會再讀一次同意書",
+      readsNow === readsBefore,
+      { readsNow, readsBefore, say },
+    );
+    check(
+      "這次同意書重畫例外留在函式裡",
+      rejections.length === before,
+      rejections.slice(before).map((reason) => String(reason?.message ?? reason)),
+    );
+    seen.disarm();
+    await boot();
+    await tick();
+    const again = p.say();
+    const boxes = p.boxes().map((item) => item.checked);
+    check(
+      "重畫例外解除後再讀一次，勾勾和檔案一致，而且說會留截圖",
+      p.invokes.filter(({ cmd }) => cmd === "consent_read").length === readsNow + 1 &&
+        boxes.join() === p.disk().join() &&
+        boxes[2] === true &&
+        again.includes("而且會留截圖") &&
+        !again.includes("repaint failed") &&
+        p.bad() === false &&
+        p.boxes()[2].disabled !== true,
+      { again, boxes, disk: p.disk(), bad: p.bad() },
+    );
+  } finally {
+    process.off("unhandledRejection", noteRejection);
+  }
 }
 
 console.log("");

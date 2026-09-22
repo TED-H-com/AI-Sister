@@ -418,11 +418,25 @@ async function openPlatformAccess(kind, event) {
     kind === "screen-recording" ? el.platformScreenOpen : el.platformAxOpen;
   if (!button || button.disabled) return;
   button.disabled = true;
+  let next;
+  let failed = false;
+  let openError;
   try {
-    const next = await invoke("platform_access_open", { kind });
-    paintPlatformAccess(next, "已開啟 macOS 設定；授權後切回這裡會自動更新。");
+    next = await invoke("platform_access_open", { kind });
   } catch (err) {
-    paintPlatformAccess(platformAccessView, String(err?.message ?? err), true);
+    failed = true;
+    openError = err;
+  }
+  try {
+    if (!failed) {
+      paintPlatformAccess(next, "已開啟 macOS 設定；授權後切回這裡會自動更新。");
+    } else {
+      paintPlatformAccess(platformAccessView, String(openError?.message ?? openError), true);
+    }
+  } catch {
+    // 系統設定已經照回條打開的那一臂，重畫失敗不改口成沒打開。
+    // 畫面會停在重畫寫到一半的樣子——這裡修不了那件事（painter 是同步的，
+    // 再呼叫一次會丟在同一行）。這裡只負責不要說謊。
   } finally {
     button.disabled = false;
   }
@@ -3217,13 +3231,19 @@ diagnoseButton?.addEventListener("click", async () => {
   }
   diagnoseButton.disabled = true;
   sayAboutDiagnose("正在讀…");
+  let text;
   try {
     const path = await invoke("diagnose_export");
-    sayAboutDiagnose(
-      `寫好了：${path}　貼之前先看一眼那條線以下的兩節，不想給就整段刪掉。`,
-    );
+    text = `寫好了：${path}　貼之前先看一眼那條線以下的兩節，不想給就整段刪掉。`;
   } catch (error) {
-    sayAboutDiagnose(`寫不出來：${error}`);
+    text = `寫不出來：${error}`;
+  }
+  try {
+    sayAboutDiagnose(text);
+  } catch {
+    // 檔案已經寫出去的那一臂，重畫失敗不改口成寫不出來。
+    // 畫面會停在重畫寫到一半的樣子——這裡修不了那件事（painter 是同步的，
+    // 再呼叫一次會丟在同一行）。這裡只負責不要說謊。
   } finally {
     diagnoseButton.disabled = false;
   }

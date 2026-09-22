@@ -235,6 +235,7 @@ async function open({
   onLoginStartupSet,
   onPlatformAccessRead,
   onPlatformAccessOpen,
+  onDiagnoseExport,
   onAzureRead,
   onAzureConfigSet,
   onAzureKeySet,
@@ -426,6 +427,9 @@ async function open({
               );
             }
             return { ...platformAccessState };
+          case "diagnose_export":
+            if (onDiagnoseExport) return onDiagnoseExport();
+            return "C:\\Users\\ted\\AppData\\Roaming\\ted-h\\AI-Sister\\diagnose-2026-09-22.txt";
           case "persona_asset_status":
             if (onAssetStatus) return onAssetStatus(assetState);
             return {
@@ -3989,6 +3993,188 @@ console.log("㊱ Usage 剩餘 token 讀後端欄位");
     "有值那列的時間不是 unix 毫秒",
     counted.includes("2025-09-12 02:40 UTC") && !counted.includes("1757644836000"),
     counted,
+  );
+}
+
+console.log("㉚ⁿ 診斷檔寫出去之後，重畫丟例外不改口成寫不出來");
+{
+  const rejections = [];
+  const noteRejection = (reason) => {
+    rejections.push(reason);
+  };
+  process.on("unhandledRejection", noteRejection);
+  try {
+    const path = "C:\\Users\\ted\\AppData\\Roaming\\ted-h\\AI-Sister\\diagnose-r8.txt";
+    const page = await open({
+      onDiagnoseExport: () => path,
+    });
+    const seen = throwOnText(page.node("[data-diagnose-say]"), "寫好了");
+    const before = rejections.length;
+    const clicked = await page.act("[data-diagnose-export]");
+    await tick();
+    const say = page.node("[data-diagnose-say]").textContent;
+    const button = page.node("[data-diagnose-export]");
+    check(
+      "前提：診斷有送出且成功句有丟",
+      clicked === true && seen.seen() === true && calls(page, "diagnose_export").length === 1,
+      { clicked, seen: seen.seen(), say, invokes: calls(page, "diagnose_export") },
+    );
+    check(
+      "診斷寫出去而重畫丟例外時，不說寫不出來",
+      !say.includes("寫不出來") && !say.includes("repaint failed"),
+      say,
+    );
+    check(
+      "這次診斷重畫例外留在函式裡",
+      rejections.length === before,
+      rejectionMessages(rejections, before),
+    );
+    check("診斷鈕沒有留在停用", button.disabled === false, button.disabled);
+    seen.disarm();
+    const againClicked = await page.act("[data-diagnose-export]");
+    const again = page.node("[data-diagnose-say]").textContent;
+    check(
+      "再按一次仍寫得出路徑，而且不說寫不出來",
+      againClicked === true &&
+        calls(page, "diagnose_export").length === 2 &&
+        again.includes(`寫好了：${path}`) &&
+        !again.includes("寫不出來") &&
+        page.node("[data-diagnose-export]").disabled === false,
+      { againClicked, again, disabled: page.node("[data-diagnose-export]").disabled },
+    );
+  } finally {
+    process.off("unhandledRejection", noteRejection);
+  }
+
+  const failed = await open({
+    onDiagnoseExport: () => {
+      throw new Error("磁碟滿了");
+    },
+  });
+  const failClicked = await failed.act("[data-diagnose-export]");
+  const failSay = failed.node("[data-diagnose-say]").textContent;
+  check(
+    "診斷真的寫不出去時，仍說寫不出來和原因",
+    failClicked === true && failSay.includes("寫不出來") && failSay.includes("磁碟滿了"),
+    failSay,
+  );
+  check(
+    "診斷失敗之後按鈕可以再按",
+    failed.node("[data-diagnose-export]").disabled === false,
+    failed.node("[data-diagnose-export]").disabled,
+  );
+}
+
+console.log("㉚ᵒ macOS 設定已經打開時，重畫丟例外不改口成失敗");
+{
+  const rejections = [];
+  const noteRejection = (reason) => {
+    rejections.push(reason);
+  };
+  process.on("unhandledRejection", noteRejection);
+  try {
+    const denied = {
+      platform: "macos",
+      screen_recording: false,
+      accessibility: false,
+    };
+    const page = await open({
+      platformAccess: denied,
+      onPlatformAccessOpen: (kind, current, store) => {
+        const next = {
+          ...current,
+          screen_recording: kind === "screen-recording" ? true : current.screen_recording,
+          accessibility: kind === "accessibility" ? true : current.accessibility,
+        };
+        store(next);
+        return next;
+      },
+    });
+    const seen = throwOnText(page.node("[data-platform-access-say]"), "已開啟 macOS 設定");
+    const before = rejections.length;
+    const readsBefore = calls(page, "platform_access_read").length;
+    const clicked = await page.act("[data-platform-screen-open]");
+    await tick();
+    const say = page.platformAccessSay();
+    const sayEl = page.node("[data-platform-access-say]");
+    const button = page.node("[data-platform-screen-open]");
+    check(
+      "前提：螢幕錄製設定有送出且成功句有丟",
+      clicked === true &&
+        seen.seen() === true &&
+        calls(page, "platform_access_open").length === 1 &&
+        calls(page, "platform_access_open")[0].arg?.kind === "screen-recording",
+      { clicked, seen: seen.seen(), say, invokes: calls(page, "platform_access_open") },
+    );
+    check(
+      "設定已經打開而重畫丟例外時，不說重畫例外，說明也不標成失敗",
+      !say.includes("repaint failed") &&
+        sayEl.classList.contains("bad") === false &&
+        calls(page, "platform_access_read").length === readsBefore,
+      {
+        say,
+        bad: sayEl.classList.contains("bad"),
+        reads: calls(page, "platform_access_read").length,
+        readsBefore,
+      },
+    );
+    check(
+      "這次系統設定重畫例外留在函式裡",
+      rejections.length === before,
+      rejectionMessages(rejections, before),
+    );
+    check("開啟設定的按鈕沒有留在停用", button.disabled === false, {
+      disabled: button.disabled,
+      hidden: button.hidden,
+    });
+    seen.disarm();
+    const readsAt = calls(page, "platform_access_read").length;
+    await page.emitWindow("focus");
+    const again = page.platformAccessSay();
+    check(
+      "切回這一頁重讀後是已開啟的螢幕錄製，不留失敗句",
+      calls(page, "platform_access_read").length === readsAt + 1 &&
+        page.node("[data-platform-screen-state]").textContent === "已開啟" &&
+        page.node("[data-platform-ax-state]").textContent === "未開啟" &&
+        !again.includes("repaint failed") &&
+        sayEl.classList.contains("bad") === false &&
+        button.disabled === false,
+      {
+        again,
+        bad: sayEl.classList.contains("bad"),
+        screen: page.node("[data-platform-screen-state]").textContent,
+        ax: page.node("[data-platform-ax-state]").textContent,
+        reads: calls(page, "platform_access_read").length,
+        disabled: button.disabled,
+      },
+    );
+  } finally {
+    process.off("unhandledRejection", noteRejection);
+  }
+
+  const failed = await open({
+    platformAccess: {
+      platform: "macos",
+      screen_recording: false,
+      accessibility: false,
+    },
+    onPlatformAccessOpen: () => {
+      throw new Error("設定打不開");
+    },
+  });
+  const failClicked = await failed.act("[data-platform-screen-open]");
+  const failSay = failed.platformAccessSay();
+  check(
+    "系統設定真的打不開時，仍把原因標成失敗",
+    failClicked === true &&
+      failSay.includes("設定打不開") &&
+      failed.node("[data-platform-access-say]").classList.contains("bad") === true &&
+      failed.node("[data-platform-screen-open]").disabled === false,
+    {
+      failSay,
+      bad: failed.node("[data-platform-access-say]").classList.contains("bad"),
+      disabled: failed.node("[data-platform-screen-open]").disabled,
+    },
   );
 }
 

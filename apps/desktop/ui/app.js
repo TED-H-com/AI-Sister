@@ -4986,27 +4986,44 @@ function markLine(queryId) {
     // 連按的時候不要送出兩筆互相打架的請求。回來之前先關起來。
     button.disabled = true;
     try {
-      // 在瀏覽器裡打開這一頁的時候要**講出來**，不是安靜地什麼都不做——那正
-      // 是 `ask()` 對同一件事的做法。一顆按了沒反應的按鈕，和一顆按了有記進
-      // 去的按鈕，在畫面上長得一模一樣。
-      if (invoke === null) throw new Error("這一頁不是在 AI-Sister 裡打開的");
-      // 照後端回的畫，不要照 `want` 畫——**寫進去了才算數**。
-      //
-      // 那個值就是傳過去的那個參數（後端沒有再讀一次表，見 `MarkOutcome`），
-      // 所以它證明的是「這一次真的寫成功了」，不是「另一個視窗剛剛也改過」。
-      // 上一版這裡寫著後者，而沒有任何東西提供它。
-      marked = await invoke("mark_query", { queryId, marked: want });
-      if (mine !== asking) return;
-      paintButton();
-      paint();
-    } catch (err) {
-      // 沒成就不要改樣子。加上一句話，不然「我按了，它沒反應」和「我按了，
-      // 它記下來了」在畫面上一模一樣——而這一格正是拿來當證據的。
-      if (mine !== asking) return;
-      noticeAboutSomethingElse(
-        `這一次標記沒記進去：${err?.message ?? err ?? "不知道為什麼"}`,
-      );
-      paint();
+      let saved;
+      let failed = false;
+      let writeError;
+      try {
+        // 在瀏覽器裡打開這一頁的時候要**講出來**，不是安靜地什麼都不做——那正
+        // 是 `ask()` 對同一件事的做法。一顆按了沒反應的按鈕，和一顆按了有記進
+        // 去的按鈕，在畫面上長得一模一樣。
+        if (invoke === null) throw new Error("這一頁不是在 AI-Sister 裡打開的");
+        // 照後端回的畫，不要照 `want` 畫——**寫進去了才算數**。
+        //
+        // 那個值就是傳過去的那個參數（後端沒有再讀一次表，見 `MarkOutcome`），
+        // 所以它證明的是「這一次真的寫成功了」，不是「另一個視窗剛剛也改過」。
+        // 上一版這裡寫著後者，而沒有任何東西提供它。
+        saved = await invoke("mark_query", { queryId, marked: want });
+      } catch (err) {
+        failed = true;
+        writeError = err;
+      }
+      if (failed) {
+        // 沒成就不要改樣子。加上一句話，不然「我按了，它沒反應」和「我按了，
+        // 它記下來了」在畫面上一模一樣——而這一格正是拿來當證據的。
+        if (mine !== asking) return;
+        noticeAboutSomethingElse(
+          `這一次標記沒記進去：${writeError?.message ?? writeError ?? "不知道為什麼"}`,
+        );
+        paint();
+      } else {
+        marked = saved;
+        if (mine !== asking) return;
+        try {
+          paintButton();
+          paint();
+        } catch {
+          // 標記已經照回條寫好。重畫失敗不改口成沒記進去。
+          // 畫面會停在重畫寫到一半的樣子——這裡修不了那件事（painter 是同步的，
+          // 再呼叫一次會丟在同一行）。這裡只負責不要說謊。
+        }
+      }
     } finally {
       button.disabled = false;
     }

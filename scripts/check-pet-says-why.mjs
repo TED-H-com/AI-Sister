@@ -5336,6 +5336,118 @@ console.log("92. 停止、晚到的 play()、失敗後重按、重開出處、tr
   }
 }
 
+// 每次命中都丟。`paint` 是同步的，第一次丟到第二次之間沒有交錯點。
+// 這裡沒有「只丟一次」的開關：補畫只在剛好只丟一次的夾具底下看起來會動。
+function throwOnText(el, needle, { afterWrite = false, message = "repaint failed" } = {}) {
+  const original = Object.getOwnPropertyDescriptor(el, "textContent");
+  let thrown = false;
+  let armed = true;
+  Object.defineProperty(el, "textContent", {
+    configurable: true,
+    get() {
+      return original.get.call(el);
+    },
+    set(value) {
+      const text = String(value);
+      if (armed && text.includes(needle)) {
+        thrown = true;
+        if (afterWrite) original.set.call(el, value);
+        throw new Error(message);
+      }
+      original.set.call(el, value);
+    },
+  });
+  return {
+    seen: () => thrown,
+    disarm() {
+      armed = false;
+    },
+  };
+}
+
+console.log("93. 標記寫進去之後重畫丟例外，不可以說沒記進去");
+{
+  const rejections = [];
+  const noteRejection = (reason) => {
+    rejections.push(reason);
+  };
+  process.on("unhandledRejection", noteRejection);
+  try {
+    const stored = new Map();
+    const p = await open(
+      {
+        ask: answer({ query_id: 42, hits: [hit({ snippet: "MARK_BODY_STAYS" })] }),
+        recording_state: "recording",
+        mark_query: (arg) => {
+          stored.set(arg?.queryId, arg?.marked);
+          return arg?.marked;
+        },
+      },
+    );
+    await p.type("這題我本來忘了");
+    const button = p.hits().querySelector(".mark-toggle");
+    check(
+      "前提：答案底下有標記鈕，而且現在是在聽",
+      button !== null && button.disabled === false && p.line().includes("在聽"),
+      { button: button?.textContent, line: p.line() },
+    );
+    const seen = throwOnText(p.node("[data-state-line]"), "在聽");
+    const before = rejections.length;
+    const clicked = await p.clickElement(button);
+    await tick();
+    const marks = p.invokes.filter(({ cmd }) => cmd === "mark_query");
+    check(
+      "前提：標記有送出且重畫有丟",
+      clicked === true &&
+        seen.seen() === true &&
+        marks.length === 1 &&
+        marks[0].arg?.queryId === 42 &&
+        marks[0].arg?.marked === true &&
+        stored.get(42) === true,
+      { clicked, seen: seen.seen(), marks, stored: [...stored.entries()] },
+    );
+    check(
+      "這次標記重畫例外留在函式裡",
+      rejections.length === before,
+      rejections.slice(before).map((reason) => String(reason?.message ?? reason)),
+    );
+    check("標記鈕沒有留在停用", button.disabled === false, button.disabled);
+    seen.disarm();
+    await p.repaint();
+    check(
+      "再畫一次也不說這一次標記沒記進去",
+      !p.line().includes("這一次標記沒記進去") &&
+        !p.line().includes("repaint failed") &&
+        button.disabled === false &&
+        button.classList.contains("on") === true,
+      { line: p.line(), disabled: button.disabled, on: button.classList.contains("on"), text: button.textContent },
+    );
+  } finally {
+    process.off("unhandledRejection", noteRejection);
+  }
+
+  const failed = await open({
+    ask: answer({ query_id: 42, hits: [hit({ snippet: "MARK_FAIL_BODY" })] }),
+    recording_state: "recording",
+    mark_query: () => {
+      throw new Error("database is locked");
+    },
+  });
+  await failed.type("這題寫不進去");
+  const failButton = failed.hits().querySelector(".mark-toggle");
+  await failed.clickElement(failButton);
+  check(
+    "標記真的沒寫進去時，仍說沒記進去和原因",
+    failed.line().includes("這一次標記沒記進去") && failed.line().includes("database is locked"),
+    failed.line(),
+  );
+  check(
+    "標記失敗之後按鈕可以再按，而且沒有變成已記下",
+    failButton.disabled === false && failButton.classList.contains("on") === false,
+    { disabled: failButton.disabled, text: failButton.textContent },
+  );
+}
+
 /* 上面那幾行把 `diagnose_note` 從 `calls` 濾掉了。濾掉和刪掉偵測器只差一步，
  * 所以這裡量一次那條路還在：實測這一輪會經過 started／persona／bar／answered
  * 四種。只斷言「有東西」不夠——四種裡剩一種也是「有東西」。 */
