@@ -44,15 +44,21 @@
   - 守不住第 3 種（字串在、但那條路走不到）。要驗那個得能判斷可達性，這裡
     做不到。所以「你應該看到 X」還是要自己問一次：X 那條 `if` 在他那台機器
     上進得去嗎？
-  - 只認**逐字**出現，而且只在「這一行有宣告動詞」的時候才看。散文裡的引號
+  - 只認**逐字**出現，而且只在「這一條有宣告動詞」的時候才看。散文裡的引號
     多半是轉述（實測 167 個候選裡 41% 對不上），全掃的話這支腳本會變成一台
     誤報機器，然後被關掉——關掉之後它守的那條線是一格空白。
-  - **否定句一律不驗**（「不可以說 X」）。理由和正面的剛好相反：X 最好不要
-    存在，那多半正是上一輪修掉的那句話。代價是真的漏得掉一種——「摘要裡不該
-    出現 X」那種，X 是產品**進得去**的壞狀態，抄錯了他會看著真的那一行覺得
-    對不上，然後回報「乾淨」。第 7 條就是這樣活下來的，只能靠人讀。
+  - SAYS 不是語意分析器：不把「不可以說」當正面動詞，但同一條有正面
+    動詞時，否定句、歷史文案、輸入問題與比喻的引號也會被挑中。它分不出
+    哪句才是產品承諾；這些紅燈要人工分類，不能拿來宣告產品退化。
   - 內插進去的值抄不下來（`「兩個都只留 {} 天」`、`「OCR 語言是 {lang}」`）。
     清單要嘛抄模板外面那一段，要嘛用 `…` 讓 TEMPLATE 跳過它。
+  - 已修掉兩個漏掃：同一條的折行先接起來（引號與宣告動詞可以分行），
+    『』不再當佔位符，擷取外層引號之後才換成產品的「」。…⋯*{} 仍跳過。
+    接縫按字元判斷：中文接中文不加空格；英數／反引號邊界或原有尾空白
+    保留一格。英文字內折行、刻意多空格、中英刻意無空格仍無法推知，
+    這些逐字引號應避免折在歧義處。接法不以原始碼是否命中來猜。
+  - 實際輸出也可能是 format!/模板內插或數段組裝，完整句子不在原始碼中。
+    這不是產品退化；仍需人工核對組裝端，不能以不存在就改掉清單。
   - 原始碼裡有沒有那句話 ≠ 那句話出得來。註解裡寫著也算過，`#[cfg(test)]`
     裡寫著也算過。這是刻意放寬的：要抓的是「改了文案忘了改清單」，不是可達性。
 """
@@ -77,7 +83,7 @@ SOURCES = (
     ".github/workflows/*.yml",
 )
 
-# 「這一行在宣告產品會說什麼」。沒有這幾個字的行不看——見上面那段「守不住的
+# 「這一條在宣告產品會說什麼」。沒有這幾個字的條目不看——見上面那段「守不住的
 # 那一半」，散文裡的引號多半是轉述。
 #
 # **只收正面的宣告動詞，不收「不可以說」。** 兩者對這支腳本的意思相反：
@@ -111,7 +117,9 @@ QUOTE = re.compile(r"「([^「」\n]+)」")
 # 太短的引號多半是名詞（「電話」「門號」），對不上也沒意義；帶刪節號或
 # 佔位符的是模板，不是逐字。
 MIN = 8
-TEMPLATE = re.compile(r"[…⋯『』*{}]|\bX \b|\bN ")
+# 2026-09-24 未改清單量測：『』增加 5 句，3 句產品現文、1 句待復原、
+# 1 句 OCR 情境轉述。先抽外層再正規化，否則會誤抽成內層短句。
+TEMPLATE = re.compile(r"[…⋯*{}]|\bX \b|\bN ")
 
 
 def die(msg, *extra):
@@ -141,19 +149,34 @@ def haystack():
 
 
 def items(lines):
-    """只走 `- [ ]` 那些條目（含它們的縮排續行），不走前言散文。
+    """合併每個 checkbox 與六格縮排續行；逐字保留來源行號。
 
-    第 9 行那句「八張都寫著『去 Windows 上測』的紙條」是散文裡的比喻，掃它
-    只會誤報。條目的形狀在這份檔案裡很穩定：`- [ ]` 開頭，續行縮排 6 格。
+    空行不結束條目；下一個 checkbox 或非縮排散文才結束。接縫只處理
+    換行和縮排，不改行內空白。origins[k] 是合併後第 k 個字的原始行號。
     """
-    inside = False
+    text, origins = "", []
+    trailing_space = False
     for i, ln in enumerate(lines, 1):
-        if re.match(r"\s*- \[[ x]\]", ln):
-            inside = True
-        elif inside and not ln.startswith("      ") and ln.strip() != "":
-            inside = False
-        if inside:
-            yield i, ln
+        start = bool(re.match(r"\s*- \[[ x]\]", ln))
+        if start or (text and ln.strip() and not ln.startswith("      ")):
+            if text:
+                yield origins, text
+            text, origins = "", []
+            trailing_space = False
+        if start or (text and ln.startswith("      ") and ln.strip()):
+            part = ln.strip()
+            # 保留既有尾空白，或英數／code 邊界的一格；中文折行直接相接。
+            space = text and (
+                trailing_space
+                or re.search(r"[A-Za-z0-9`]$", text)
+                or re.match(r"[A-Za-z0-9`]", part)
+            )
+            joined = (" " if space else "") + part
+            text += joined
+            origins.extend([i] * len(joined))
+            trailing_space = ln != ln.rstrip()
+    if text:
+        yield origins, text
 
 
 def main():
@@ -164,34 +187,42 @@ def main():
     src = haystack()
 
     checked, bad = 0, []
-    for i, ln in items(lines):
-        wanted = QUOTE.findall(ln) if SAYS.search(ln) else []
-        wanted += POSITION.findall(ln)
-        # 兩條規則都挑到同一句的時候只算一次，不然活體那個數字會虛胖。
-        for q in dict.fromkeys(wanted):
+    for origins, ln in items(lines):
+        wanted = list(QUOTE.finditer(ln)) if SAYS.search(ln) else []
+        wanted += list(POSITION.finditer(ln))
+        # 同一引號被兩條規則挑中只算一次；不同位置的相同文案各自有行號。
+        seen = set()
+        for match in wanted:
+            if match.start() in seen:
+                continue
+            seen.add(match.start())
+            q = match[1]
             if len(q) < MIN or TEMPLATE.search(q):
                 continue
+            q = q.translate(str.maketrans("『』", "「」"))
             checked += 1
             if q not in src:
-                bad.append((i, q))
+                bad.append((origins[match.start()], q))
 
     # 活體檢查。哪天條目的排版換了、或那幾個宣告動詞被改掉，這支腳本會安靜地
     # 一句都掃不到然後回報綠——那正是它要抓的那種壞法，發生在它自己身上。
-    if checked < 10:
+    # 守存量的大幅消失，不釘今天的總數；擋整份排版失配，也擋退回逐行掃描。
+    # 擋不住少數漏掃、錯挑散文或字串雖在卻走不到；仍需定點突變與人工分類。
+    if checked < 100:
         die(
             f"只挑出 {checked} 句話來對，太少了",
-            "這份清單有幾百行，正常會挑出二十句上下。",
+            "這份清單目前有兩百句左右候選；少於 100 句要先檢查掃描器。",
             "多半是條目的排版變了（`- [ ]` / 六格縮排），或 SAYS 那幾個動詞對不上了。",
         )
 
     if bad:
-        print(f"✗ 清單叫他去對照 {len(bad)} 句產品說不出口的話：")
+        print(f"✗ 檢查 {checked} 句，其中 {len(bad)} 句在原始碼找不到，需分類：")
         for i, q in bad:
             print(f"  {DOC}:{i}")
             print(f"      「{q}」")
         print()
-        print("  他會照著找、找不到，然後回報一個沒有壞的東西壞了。")
-        print("  把清單改成程式裡真正那句話（逐字抄），或者把那句話加回程式裡。")
+        print("  逐條分辨清單過期、產品退化、轉述／模板／組裝；找不到不等於產品說不出口。")
+        print("  有現行文案證據才更新清單；產品退化須修產品，不能為了綠燈改承諾。")
         sys.exit(1)
 
     print(f"✓ 清單裡那 {checked} 句「產品會說 X」，X 在原始碼裡都找得到")
