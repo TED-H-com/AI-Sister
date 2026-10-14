@@ -10,7 +10,7 @@ edition = "2024"
 # 一個第一次 clone 的人只有一次機會。
 rust-version = "1.88"
 license = "Apache-2.0"
-repository = "https://github.com/teddashh/AI-Sister"
+repository = "https://github.com/TED-H-com/AI-Sister"
 authors = ["Ted Huang <ted@ted-h.com>"]
 
 [workspace.dependencies]

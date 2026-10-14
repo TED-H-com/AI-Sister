@@ -8,8 +8,8 @@
 
 | 分支 | HEAD | CI |
 |---|---|---|
-| `main` | `5cfd22c5e21c44e379366ca60fe5e006ee57f62b` | [35645786858](https://github.com/teddashh/AI-Sister/actions/runs/35645786858) **success**。Windows、Linux、X11、macOS、兩支 1.88 compile 都綠 |
-| `codex/grok-sweep-20260921` | `d249b6198deceeeca992d773db1ec9c94a004ef8` | [35645789163](https://github.com/teddashh/AI-Sister/actions/runs/35645789163) **success**。同一組 job 都綠。產品檔與 main 對過是同一份 |
+| `main` | `5cfd22c5e21c44e379366ca60fe5e006ee57f62b` | [35645786858](https://github.com/TED-H-com/AI-Sister/actions/runs/35645786858) **success**。Windows、Linux、X11、macOS、兩支 1.88 compile 都綠 |
+| `codex/grok-sweep-20260921` | `d249b6198deceeeca992d773db1ec9c94a004ef8` | [35645789163](https://github.com/TED-H-com/AI-Sister/actions/runs/35645789163) **success**。同一組 job 都綠。產品檔與 main 對過是同一份 |
 
 本機 main 工作目錄：`/home/ted-h/projects/AI-Sister`。
 整合 worktree：`/home/ted-h/tmp-tests/sister-word-boundaries`。
@@ -205,7 +205,7 @@ Windows 主執行緒預設 1MB。debug 組裝那份已在磁碟上的稽核報�
 ## 8. 建議的下一步
 
 1. ~~`5cfd22c` 的 main CI [35645786858](...) 已綠……這就是可留的 main。不要自己切 tag。~~
-   **過期。** 可留的 main 現在是 `54173d0`，CI [35664163423](https://github.com/teddashh/AI-Sister/actions/runs/35664163423) 六個 job 全綠，已打 `v0.1.0-alpha.146`。見第 9 節。
+   **過期。** 可留的 main 現在是 `54173d0`，CI [35664163423](https://github.com/TED-H-com/AI-Sister/actions/runs/35664163423) 六個 job 全綠，已打 `v0.1.0-alpha.146`。見第 9 節。
 2. 若下一次 Edge PDF 又紅，先讀 fixture 的 `stage`／`metadata`，不要再加一輪無上限的樹走查。
    - stage 停在 `activating PDF viewport`、metadata 空白：掛點在點擊或 `^{HOME}`，或在就緒迴圈的 `Get-SisterPdfPage`。
    - 第一幀 OCR 只有 `reader.pdf` 和暫存路徑：頁面 canvas 還沒畫進 BitBlt。現在的等待是 2.5 秒。
@@ -233,7 +233,7 @@ f13dea3 docs: the PDF clip is breadth-first with a depth-1 exception
 四個資產：`AI-Sister-Setup.exe`、`sister.exe`、`sister-desktop.exe`、`AI-Sister-Linux-X11-amd64.deb`。
 
 **收據（不是宣稱）。** tag 那一次的 run 是
-[35667618922](https://github.com/teddashh/AI-Sister/actions/runs/35667618922)，八個 job 全綠
+[35667618922](https://github.com/TED-H-com/AI-Sister/actions/runs/35667618922)，八個 job 全綠
 （六個建置 job ＋ `Release` ＋ `Website`）。打完 tag 之後另外跑了一支不採信 workflow 自述的
 驗證腳本，四項分開驗：
 

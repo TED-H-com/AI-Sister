@@ -82,8 +82,8 @@ alpha.107 的 Windows login mode 是窄例外：它不在登入背景啟動時�
 ## 結尾
 
 隱私承諾與邊界見
-[PRIVACY.md](https://github.com/teddashh/AI-Sister/blob/main/docs/PRIVACY.md)、
-[THREAT_MODEL.md](https://github.com/teddashh/AI-Sister/blob/main/docs/THREAT_MODEL.md)。
+[PRIVACY.md](https://github.com/TED-H-com/AI-Sister/blob/main/docs/PRIVACY.md)、
+[THREAT_MODEL.md](https://github.com/TED-H-com/AI-Sister/blob/main/docs/THREAT_MODEL.md)。
 
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**
 
@@ -2697,7 +2697,7 @@ alpha.120 沒有配置正式發行憑證，三個公開 exe 維持 unsigned。CI
 另用 throwaway self-signed PFX 重建、安裝，再以 fixed signer、exact untrusted-root
 狀態與 in-process custom root 驗證 main、sidecar、uninstaller 與 Setup 的完整簽章接線；
 fixture 隨 runner 清除，不進 Release。正式憑證的設定與驗證命令集中在
-[`docs/WINDOWS-CODE-SIGNING.md`](https://github.com/teddashh/AI-Sister/blob/main/docs/WINDOWS-CODE-SIGNING.md)。
+[`docs/WINDOWS-CODE-SIGNING.md`](https://github.com/TED-H-com/AI-Sister/blob/main/docs/WINDOWS-CODE-SIGNING.md)。
 
 
 ## v0.1.0-alpha.119
@@ -5484,7 +5484,7 @@ stdin，就簽得出這個名。現在會問人的模式**在打開資料庫之�
 
 （`sister.exe doctor` 那一格**沒有**跟著修：它印的是「暫停中（不知道從什麼
 時候開始）」，兩種成因在那一行上仍然長得一模一樣。這一條還在
-[PHASES.md](https://github.com/teddashh/AI-Sister/blob/main/docs/PHASES.md)
+[PHASES.md](https://github.com/TED-H-com/AI-Sister/blob/main/docs/PHASES.md)
 的「已知還在說謊的地方」上。）（alpha.80 已補上。）
 
 ### 那支大腦 CLI 沒把問題讀完就退場，她不會把它印的東西當成答案

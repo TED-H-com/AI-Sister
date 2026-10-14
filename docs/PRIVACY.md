@@ -866,6 +866,6 @@ bug。詳見 [THREAT_MODEL.md](THREAT_MODEL.md#最危險的失效模式安靜地
 
 ## 回報
 
-<https://github.com/teddashh/AI-Sister/issues>
+<https://github.com/TED-H-com/AI-Sister/issues>
 
 最有價值的回報是：**「這條規則在我的機器上沒有生效。」**

@@ -15,7 +15,7 @@ import tomllib
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "site"
 PERSONAS = ROOT / "apps/desktop/ui/personas"
-REPOSITORY = "https://github.com/teddashh/AI-Sister"
+REPOSITORY = "https://github.com/TED-H-com/AI-Sister"
 # site/ 的發布白名單，兩邊都算：這裡列的每一個都要在，site/ 裡也不能有沒列的。
 # 每一頁都是 template，各自要展開全部 token、各自對 persona manifest。
 PAGES = ("index.html", "en/index.html")

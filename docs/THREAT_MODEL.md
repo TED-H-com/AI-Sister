@@ -508,7 +508,7 @@ redirect 或站內內容。承諾綁定擋的是「模型自己換目標」，�
 
 ## 回報問題
 
-發現隱私缺口請開 issue：<https://github.com/teddashh/AI-Sister/issues>
+發現隱私缺口請開 issue：<https://github.com/TED-H-com/AI-Sister/issues>
 
 **特別歡迎「這條規則在我的機器上沒生效」這類回報**——那正是上面三個
 bug 的形狀，而且是最難靠讀程式碼發現的。

@@ -2957,7 +2957,7 @@ mod tests {
         // 排除規則太寬會讓她變成瞎子，一樣是 bug
         let p = PrivacyConfig::default();
         for url in [
-            "https://github.com/teddashh/AI-Sister",
+            "https://github.com/TED-H-com/AI-Sister",
             "https://bill.cht.com.tw/query",
             "https://docs.rs/rusqlite/latest/rusqlite/",
             "https://news.ycombinator.com/item?id=1",

@@ -213,7 +213,7 @@ replay 畫面位址列恰好等於注入 URL、另有可信瀏覽紀錄的情境
 **AI-Sister 是一個在 Windows 上安靜看著螢幕、事後答得出「我昨天在幹嘛」、而且每一
 句話都點得開證據的本機記錄器。**
 
-- **repo**：`https://github.com/teddashh/AI-Sister`（public，Apache-2.0；產出的角色
+- **repo**：`https://github.com/TED-H-com/AI-Sister`（public，Apache-2.0；產出的角色
   圖與語音以 NOTICE 排除在該授權之外）
 - **本機工作目錄**：`/home/ted-h/projects/AI-Sister`，branch `main`，直接推 `main`，
   不開 PR。

@@ -251,7 +251,7 @@ mod tests {
             None
         );
         assert_eq!(
-            looks_like_secret("https://github.com/teddashh/AI-Sister/blob/main/docs/SPEC.md"),
+            looks_like_secret("https://github.com/TED-H-com/AI-Sister/blob/main/docs/SPEC.md"),
             None
         );
         // 長但是有空白的散文，不該被熵規則抓走

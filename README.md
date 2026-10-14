@@ -12,7 +12,7 @@
 > separate, default-off Azure TTS option can send only each newly completed
 > answer body after its own consent; manual replay sends it again. Local speech remains the default.
 
-**專案介紹頁：** https://teddashh.github.io/AI-Sister/ · 英文版 https://teddashh.github.io/AI-Sister/en/
+**專案介紹頁：** https://ted-h-com.github.io/AI-Sister/ · 英文版 https://ted-h-com.github.io/AI-Sister/en/
 
 **Status: v0.1.0-alpha.170**
 
@@ -36,8 +36,8 @@ AI-Sister 在本機執行最多三條查詢，再把命中的文字與出處交�
 - macOS 14+：ScreenCaptureKit、Vision OCR、AX 隱私脈絡與 TCC 設定介面已接進 product build；
   公開下載在 Developer ID notarization 與原生 TCC/S1 驗收完成後加入 Release。
 
-下載請到 [官方網站](https://teddashh.github.io/AI-Sister/) 或
-[Releases](https://github.com/teddashh/AI-Sister/releases)。
+下載請到 [官方網站](https://ted-h-com.github.io/AI-Sister/) 或
+[Releases](https://github.com/TED-H-com/AI-Sister/releases)。
 
 ## Claude Code / Codex Skill
 
@@ -147,7 +147,7 @@ retroactively 修改。Windows 簽章與發版規則見
 ## 跑起來
 
 **Windows 10 以上**：從
-[Releases](https://github.com/teddashh/AI-Sister/releases) 優先下載
+[Releases](https://github.com/TED-H-com/AI-Sister/releases) 優先下載
 `AI-Sister-Setup.exe`；只想跑 CLI 或診斷 installer 問題時，仍可下載兩個免安裝
 執行檔並放在同一個資料夾（桌面姊妹是去隔壁找 `sister.exe` 的）。她要先拿到第一張
 同意書才會動：
@@ -350,7 +350,7 @@ SISTER_DISCORD_WEBHOOK='https://discord.com/api/webhooks/…/…' \
 sister hands runs --json          # 本機完整接手審計；含 task 與動作目標，不是去敏報告
 ```
 
-**Linux X11（Ubuntu 24.04）安裝**：從 [Releases](https://github.com/teddashh/AI-Sister/releases)
+**Linux X11（Ubuntu 24.04）安裝**：從 [Releases](https://github.com/TED-H-com/AI-Sister/releases)
 下載 `AI-Sister-Linux-X11-amd64.deb`：
 
 ```bash
@@ -361,14 +361,14 @@ sudo apt install ./AI-Sister-Linux-X11-amd64.deb
 
 **macOS 14+ 狀態**：目前沒有可公開下載的 `.app` 或 `.dmg`。ScreenCaptureKit、Vision OCR、
 AX 隱私脈絡與 TCC 設定介面已在同一份 product build；等 Developer ID notarization 與 Apple
-Silicon 真機的 TCC／S1 驗收一起通過，才會在 [Releases](https://github.com/teddashh/AI-Sister/releases)
+Silicon 真機的 TCC／S1 驗收一起通過，才會在 [Releases](https://github.com/TED-H-com/AI-Sister/releases)
 加入公開安裝檔。CI 的 hardened ad-hoc app-tree diagnostic 不是 Preview，不提供一般安裝。
 
 **從原始碼**：Windows、macOS 與 Linux 都可建置同一支 CLI。下面先用
 repo 內的確定性腳本重播一遍：
 
 ```
-git clone https://github.com/teddashh/AI-Sister.git
+git clone https://github.com/TED-H-com/AI-Sister.git
 cd AI-Sister
 cargo build --release -p sister-cli --locked
 ./target/release/sister --data-dir ./data replay scenarios/bill-lookup.json

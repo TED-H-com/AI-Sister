@@ -13,7 +13,7 @@
 > separate, default-off Azure TTS option can send only each newly completed
 > answer body after its own consent; manual replay sends it again. Local speech remains the default.
 
-**Project page:** https://teddashh.github.io/AI-Sister/en/ · Traditional Chinese: https://teddashh.github.io/AI-Sister/
+**Project page:** https://ted-h-com.github.io/AI-Sister/en/ · Traditional Chinese: https://ted-h-com.github.io/AI-Sister/
 
 **Status: v0.1.0-alpha.170**
 
@@ -49,8 +49,8 @@ and resent automatically to the currently selected CLI once you have answered.
   the product build; a public download joins the Release after Developer ID notarization and native
   TCC/S1 acceptance are done.
 
-Download from the [project page](https://teddashh.github.io/AI-Sister/en/) or
-[Releases](https://github.com/teddashh/AI-Sister/releases).
+Download from the [project page](https://ted-h-com.github.io/AI-Sister/en/) or
+[Releases](https://github.com/TED-H-com/AI-Sister/releases).
 
 ## Claude Code / Codex Skill
 
@@ -198,7 +198,7 @@ signed yet.
 ## Run it
 
 **Windows 10 or later**: from
-[Releases](https://github.com/teddashh/AI-Sister/releases), download
+[Releases](https://github.com/TED-H-com/AI-Sister/releases), download
 `AI-Sister-Setup.exe` first. If you only want the CLI or need to diagnose an installer problem, you
 can still download the two no-install executables and put them in the same folder (the desktop sister
 looks for `sister.exe` next to itself). She won't do anything until she has the first consent:
@@ -454,7 +454,7 @@ SISTER_DISCORD_WEBHOOK='https://discord.com/api/webhooks/…/…' \
 sister hands runs --json          # full local takeover audit; includes the task and action targets, not a redacted report
 ```
 
-**Linux X11 (Ubuntu 24.04) install**: from [Releases](https://github.com/teddashh/AI-Sister/releases),
+**Linux X11 (Ubuntu 24.04) install**: from [Releases](https://github.com/TED-H-com/AI-Sister/releases),
 download `AI-Sister-Linux-X11-amd64.deb`:
 
 ```bash
@@ -466,7 +466,7 @@ Tesseract.
 
 **macOS 14+ status**: there is currently no publicly downloadable `.app` or `.dmg`. ScreenCaptureKit,
 Vision OCR, AX privacy context, and the TCC settings UI are in the same product build; a public
-installer is added to [Releases](https://github.com/teddashh/AI-Sister/releases) only after Developer
+installer is added to [Releases](https://github.com/TED-H-com/AI-Sister/releases) only after Developer
 ID notarization and TCC/S1 acceptance on real Apple Silicon hardware both pass. CI's hardened ad-hoc
 app-tree diagnostic is not a Preview and isn't offered for general installation.
 
@@ -474,7 +474,7 @@ app-tree diagnostic is not a Preview and isn't offered for general installation.
 deterministic script in the repo:
 
 ```
-git clone https://github.com/teddashh/AI-Sister.git
+git clone https://github.com/TED-H-com/AI-Sister.git
 cd AI-Sister
 cargo build --release -p sister-cli --locked
 ./target/release/sister --data-dir ./data replay scenarios/bill-lookup.json

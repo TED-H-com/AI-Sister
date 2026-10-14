@@ -58,4 +58,4 @@
 接續仍以 OCR／UIA／RAG 與隱私邊界為先，遇到實際缺口再切最小修正；不用重做 overview、
 重發 alpha.145 或重跑已結案的 CPU／磁碟研究。容量優化仍依 Ted 定案後排。
 
-[alpha.145 Release 與下載](https://github.com/teddashh/AI-Sister/releases/tag/v0.1.0-alpha.145)
+[alpha.145 Release 與下載](https://github.com/TED-H-com/AI-Sister/releases/tag/v0.1.0-alpha.145)

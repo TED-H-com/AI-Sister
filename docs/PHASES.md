@@ -823,7 +823,7 @@ Release 1.0 必做、使用者 opt-in 的產品面。主動性繼續用預算和
     17 位離線角色、544 段語音、自帶 CLI 大腦與四張獨立同意；沒有 analytics、外部字型或
     第三方 runtime 素材。build 從 root 版號產生 exact tag／Setup URL，逐檔重驗 17 張 WebP
     的 manifest bytes／hash／總量；只有同一輪 Release 公開後，獨立 Pages job 才部署
-    <https://teddashh.github.io/AI-Sister/>。
+    <https://ted-h-com.github.io/AI-Sister/>。
     1.0 不內建自動 updater，由使用者手動下載新版 installer。
   - ✅ alpha.123 完成四支 CLI 大腦登入：設定頁直接偵測 Claude Code、Codex、Gemini CLI、
     Grok CLI 與版本，從 trusted click 啟動 provider 官方登入，接著用 bundled bridge 跑固定

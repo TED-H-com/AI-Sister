@@ -18,7 +18,7 @@ assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
-PAGES_URL = "https://teddashh.github.io/AI-Sister/"
+PAGES_URL = "https://ted-h-com.github.io/AI-Sister/"
 
 
 def one(pattern: str, html: str) -> str:
@@ -177,7 +177,7 @@ class WebsiteBuildTests(unittest.TestCase):
                 self.assertEqual(en.count(url), zh.count(url))
 
             for html in (zh, en):
-                self.assertIn('href="https://github.com/teddashh/AI-Sister/releases"', html)
+                self.assertIn('href="https://github.com/TED-H-com/AI-Sister/releases"', html)
             self.assertIn('src="../assets/personas/chatgpt.webp"', en)
             self.assertIn('href="../styles.css"', en)
             self.assertIn('src="../site.js"', en)
