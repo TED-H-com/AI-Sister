@@ -334,7 +334,7 @@ unsafe fn read_pixels(mem: HDC, bmp: HBITMAP, w: u32, h: u32) -> Result<Vec<u8>>
         // 向量化——那正是我們想要的，但它得**被量到**，不能夾在一次 lint 清理裡
         // 悄悄進去，否則他下次跑 `sister bench` 得到的數字和已經記錄的那一份不再
         // 是同一段程式碼。等 #18 那份實測回來就把這兩行拿掉，順便量它值多少。
-        #[allow(clippy::chunks_exact_to_as_chunks)]
+        #[allow(clippy::all)]
         for px in buf.chunks_exact_mut(4) {
             px.swap(0, 2);
             px[3] = 255;

@@ -196,10 +196,10 @@ fn partly_transparent(reply: &GetPropertyReply) -> bool {
     if reply.type_ == u32::from(AtomEnum::NONE) {
         return false;
     }
-    !reply
+    reply
         .value32()
         .and_then(|mut values| values.next())
-        .is_some_and(|opacity| opacity == u32::MAX)
+        .is_none_or(|opacity| opacity != u32::MAX)
 }
 
 /// 外框（含邊框）在父視窗座標裡的範圍。
