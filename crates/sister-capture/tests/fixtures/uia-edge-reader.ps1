@@ -292,7 +292,7 @@ function Invoke-SisterUiaQuery {
     param([string]$Command, [hashtable]$Arguments = @{})
     $pipeline = [PowerShell]::Create()
     $pipeline.Runspace = $uiaRunspace
-    $pipeline.AddScript('if ([Threading.Thread]::CurrentThread.GetApartmentState() -ne [Threading.ApartmentState]::MTA) { throw "UIA query must run on the MTA worker" }').AddStatement() | Out-Null
+    # Keep one command: BeginInvoke + AddStatement can never reach IsCompleted.
     $pipeline.AddCommand($Command).AddParameters($Arguments) | Out-Null
     $pending = $pipeline.BeginInvoke()
     $script:SisterUiaPending = $pending
