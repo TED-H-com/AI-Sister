@@ -335,7 +335,7 @@ unsafe fn read_pixels(mem: HDC, bmp: HBITMAP, w: u32, h: u32) -> Result<Vec<u8>>
         // 悄悄進去，否則他下次跑 `sister bench` 得到的數字和已經記錄的那一份不再
         // 是同一段程式碼。等 #18 那份實測回來就把這兩行拿掉，順便量它值多少。
         #[allow(unknown_lints)]
-        for px in buf.chunks_exact_mut(4) {
+        for px in buf.as_chunks_mut::<4>().0 {
             px.swap(0, 2);
             px[3] = 255;
         }
