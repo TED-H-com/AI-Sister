@@ -482,6 +482,7 @@ nav a:focus-visible {
 .orbit {
   border: 1px dashed rgb(149 85 114 / 28%);
   border-radius: 50%;
+  max-width: 100%;
   left: 50%;
   position: absolute;
   top: 50%;
