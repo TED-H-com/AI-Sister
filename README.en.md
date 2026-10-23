@@ -15,7 +15,7 @@
 
 **Project page:** https://ted-h-com.github.io/AI-Sister/en/ · Traditional Chinese: https://ted-h-com.github.io/AI-Sister/
 
-**Status: v0.1.0-alpha.170**
+**Status: v0.1.0-alpha.171**
 
 The app itself (interface, consent sheets, character voices) is in Traditional Chinese and Mandarin.
 This file is an English translation of [README.md](README.md). Where the app shows Chinese text, the

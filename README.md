@@ -14,7 +14,7 @@
 
 **專案介紹頁：** https://ted-h-com.github.io/AI-Sister/ · 英文版 https://ted-h-com.github.io/AI-Sister/en/
 
-**Status: v0.1.0-alpha.170**
+**Status: v0.1.0-alpha.171**
 
 AI-Sister 已完成本機記錄、OCR、L0 到 L3 記憶、本機 RAG、逐句可點出處，以及 Claude Code、
 Codex、Gemini CLI、Grok CLI 四種大腦登入。四姊妹與 13 位閨密共 17 位；角色圖、
