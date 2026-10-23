@@ -269,6 +269,53 @@ function Invoke-SisterWheelDown {
     }
     $script:SisterPdfWheelAt = [DateTime]::UtcNow
 }
+# The STA thread owns the backdrop and sends input. UIA must run on a separate
+# MTA thread without windows; waiting for it must keep the STA message pump alive.
+# https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-threading
+$uiaState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+foreach ($name in @(
+    'Get-SisterFocusedElement', 'Write-SisterUiaMetadata', 'Get-SisterPdfPage',
+    'Get-SisterParentElement', 'Get-SisterAncestorTextDocument',
+    'Get-SisterInnerHtmlDocument', 'Test-SisterHtmlInnerDocumentFocused',
+    'Invoke-SisterHtmlInnerDocumentFocus'
+)) {
+    $definition = (Get-Item "function:$name").Definition
+    $uiaState.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new($name, $definition))
+}
+$uiaState.Variables.Add([System.Management.Automation.Runspaces.SessionStateVariableEntry]::new('StateDir', $StateDir, 'Owned fixture directory'))
+$uiaRunspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace($uiaState)
+$uiaRunspace.ApartmentState = [Threading.ApartmentState]::MTA
+$uiaRunspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
+$uiaRunspace.Open()
+$script:SisterUiaPending = $null
+function Invoke-SisterUiaQuery {
+    param([string]$Command, [hashtable]$Arguments = @{})
+    $pipeline = [PowerShell]::Create()
+    $pipeline.Runspace = $uiaRunspace
+    $pipeline.AddScript('if ([Threading.Thread]::CurrentThread.GetApartmentState() -ne [Threading.ApartmentState]::MTA) { throw "UIA query must run on the MTA worker" }').AddStatement() | Out-Null
+    $pipeline.AddCommand($Command).AddParameters($Arguments) | Out-Null
+    $pending = $pipeline.BeginInvoke()
+    $script:SisterUiaPending = $pending
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    try {
+        while (-not $pending.IsCompleted) {
+            [System.Windows.Forms.Application]::DoEvents()
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw "Owned Edge UIA query '$Command' did not return within 10 seconds"
+            }
+            Start-Sleep -Milliseconds 10
+        }
+        $result = $pipeline.EndInvoke($pending)
+        if ($pipeline.HadErrors) { throw $pipeline.Streams.Error[0].Exception }
+        # Only strings, booleans and the page snapshot leave this worker.
+        return $result
+    } finally {
+        # A blocked provider cannot be cancelled by disposing its caller. Leave
+        # it to the Rust fixture's bounded process-tree teardown instead of
+        # blocking this thread again during error reporting.
+        if ($pending.IsCompleted) { $pipeline.Dispose() }
+    }
+}
 $script:SisterPdfGroupScan = 'unscanned'
 $script:SisterPdfClick = $null
 $script:SisterPdfMarked = $null
@@ -430,7 +477,7 @@ window.addEventListener('keydown', event => {
             # the wrong PDF page. Do not poke a document that is already the
             # provider we want while its text pattern is still filling in.
             if ($Pdf -and $mode -eq 'top') {
-                $page = Get-SisterPdfPage
+                $page = Invoke-SisterUiaQuery 'Get-SisterPdfPage'
                 $documentReady = $null -ne $page -and $page.Kind -eq 'Document' -and -not $page.Offscreen -and (
                     $page.Scope.Contains('PDF-FIRST') -or $page.Visible.Contains('PDF-FIRST')
                 )
@@ -442,9 +489,9 @@ window.addEventListener('keydown', event => {
                     continue
                 }
             } elseif ($mode -in @('top', 'bottom') -and -not $Pdf) {
-                if (-not (Test-SisterHtmlInnerDocumentFocused)) {
+                if (-not (Invoke-SisterUiaQuery 'Test-SisterHtmlInnerDocumentFocused')) {
                     [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'HTML descendant Group; focusing inner Document')
-                    Invoke-SisterHtmlInnerDocumentFocus
+                    Invoke-SisterUiaQuery 'Invoke-SisterHtmlInnerDocumentFocus' | Out-Null
                 }
             }
         }
@@ -476,8 +523,8 @@ window.addEventListener('keydown', event => {
             }
         } elseif ($Pdf -and $mode -ne 'address') {
             [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'reading direct PDF document')
-            Write-SisterUiaMetadata -Hwnd $hwnd -Extra @("group-scan=$script:SisterPdfGroupScan")
-            $page = Get-SisterPdfPage
+            Invoke-SisterUiaQuery 'Write-SisterUiaMetadata' @{ Hwnd = $hwnd; Extra = @("group-scan=$script:SisterPdfGroupScan") }
+            $page = Invoke-SisterUiaQuery 'Get-SisterPdfPage'
             $ancestors = @()
             $extra += "group-scan=$script:SisterPdfGroupScan"
             if ($null -ne $page) {
@@ -493,14 +540,14 @@ window.addEventListener('keydown', event => {
             }
         } elseif ($mode -in @('top', 'bottom')) {
             [IO.File]::WriteAllText((Join-Path $StateDir 'stage'), 'waiting for HTML inner Document')
-            if (-not (Test-SisterHtmlInnerDocumentFocused)) {
-                Invoke-SisterHtmlInnerDocumentFocus
+            if (-not (Invoke-SisterUiaQuery 'Test-SisterHtmlInnerDocumentFocused')) {
+                Invoke-SisterUiaQuery 'Invoke-SisterHtmlInnerDocumentFocus' | Out-Null
             }
-            $ready = (Test-SisterHtmlInnerDocumentFocused) -and $browser.MainWindowTitle.StartsWith("Sister Edge $mode")
+            $ready = (Invoke-SisterUiaQuery 'Test-SisterHtmlInnerDocumentFocused') -and $browser.MainWindowTitle.StartsWith("Sister Edge $mode")
         } elseif ($Pdf -or $mode -eq 'address' -or $browser.MainWindowTitle.StartsWith("Sister Edge $mode")) {
             $ready = $true
         }
-        Write-SisterUiaMetadata -Hwnd $hwnd -Extra $extra
+        Invoke-SisterUiaQuery 'Write-SisterUiaMetadata' @{ Hwnd = $hwnd; Extra = $extra }
         # Document focus is ready before the PDF canvas has painted. The first
         # screenshot then OCRs only the Edge chrome.
         if ($ready -and $Pdf -and $mode -eq 'top') {
@@ -524,6 +571,9 @@ window.addEventListener('keydown', event => {
     [IO.File]::WriteAllText((Join-Path $StateDir 'error'), $_.Exception.ToString())
 } finally {
     if ($backdrop) { $backdrop.Dispose() }
+    if ($null -eq $script:SisterUiaPending -or $script:SisterUiaPending.IsCompleted) {
+        $uiaRunspace.Dispose()
+    }
     if ($browser) {
         # Unique --user-data-dir means this PID/tree never belongs to a user's Edge session.
         & taskkill.exe /PID $browser.Id /T /F 2>&1 | Out-Null
