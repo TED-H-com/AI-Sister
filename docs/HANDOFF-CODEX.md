@@ -1,5 +1,21 @@
 # HANDOFF — 交給下一位 agent（Codex）
 
+**2026-10-23 alpha.171 已出貨：**[release](https://github.com/TED-H-com/AI-Sister/releases/tag/v0.1.0-alpha.171)
+的 tag 指向 `e627c5de1e5b6f96bbb41fa0b8ba1ad4716aa0c3`。整合安裝退出提示、英文 README／官網、
+動畫圖解與 Rust 1.99 相容性；Rust 1.88 支援仍通過。
+Edge 測試 fixture 的 UIA 查詢改在獨立、無視窗的 MTA worker 執行；非同步 pipeline 只放一個
+command，避免 `AddStatement` 卡住。`scripts/check-uia-worker.ps1` 直接測真實 helper 的
+參數、結果、false、錯誤與重用；加回批次 statement 的突變確實失敗。
+[主線 CI](https://github.com/TED-H-com/AI-Sister/actions/runs/39891256253) 六個工作與 CodeQL 通過；
+[tag CI](https://github.com/TED-H-com/AI-Sister/actions/runs/39896470761) 最終八個工作全部成功。
+tag 首輪三個原生 UIA 測試逾時，單獨重跑 Windows 後全過；原有斷言完整保留。
+Windows 原生 UIA／錄製測試通過；同輪 Setup 通過安裝／重裝／移除與 alpha.110 升級保留資料。
+簽章 fixture 全過，公開 alpha 產物仍未簽署。
+四個下載檔已公開，中英文官網皆指向本版；匿名下載 Setup 為 280,337,354 bytes，SHA-256
+`699967d812ab48aade8476f5f4233a4f91a5f273c805a4c47970deda8425b1e5`，與 release asset 相符。
+繁中 OCR 仍是 `SKIPPED lang=en-US zh=none available=en-US`；本輪原生收據涵蓋中文 UIA 與英文 OCR。
+下一步依 `docs/PHASES.md` 的 Release 1.0 exit criteria；正式簽章與正式 artifact 驗收仍未關閉。
+
 **2026-09-30 Phase 7 關閉（alpha.170）：**`sister takeover` 把承諾表上做得到的下一步（最多
 五步）連同一張剛好涵蓋那幾步的授權書一次端出來；他在終端機答一次「好」，她照順序做，每一步
 看下一張畫面。提議與回答寫在 `action-log.jsonl`（`handoff_offered`／`handoff_answered`），和
