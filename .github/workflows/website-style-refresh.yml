@@ -1,0 +1,76 @@
+name: Refresh published website styles
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published release whose website content and assets are retained
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: website-style-refresh
+  cancel-in-progress: false
+
+jobs:
+  website:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - name: Require an existing public release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > release.json
+          python3 - <<'PY'
+          import json, os
+          release = json.load(open('release.json'))
+          assert release['tag_name'] == os.environ['RELEASE_TAG']
+          assert release['published_at'] and not release['draft']
+          names = {asset['name'] for asset in release['assets']}
+          assert {'AI-Sister-Setup.exe', 'AI-Sister-Linux-X11-amd64.deb'} <= names
+          PY
+      - name: Check out the released website and assets
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_tag }}
+          path: released
+          persist-credentials: false
+      - name: Check out the reviewed stylesheet
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: refresh
+          persist-credentials: false
+          sparse-checkout: site/styles.css
+          sparse-checkout-cone-mode: false
+      - name: Build with released content and updated styles
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          cp refresh/site/styles.css released/site/styles.css
+          cd released
+          python3 - <<'PY'
+          import os, tomllib
+          version = tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version']
+          assert 'v' + version == os.environ['RELEASE_TAG']
+          PY
+          python3 -m unittest scripts/tests/test_build_website.py
+          python3 scripts/build-website.py --output ./_site
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: released/_site
+      - uses: actions/deploy-pages@v5
+        id: deployment
