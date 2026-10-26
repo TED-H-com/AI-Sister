@@ -889,6 +889,7 @@ Most documents under `docs/` and `research/` are in Traditional Chinese;
 | [research/landscape.md](research/landscape.md) | Competitors and the ecosystem (checked 2026-08): Recall, Rewind/Limitless, Screenpipe, Everywhere, desktop AI apps, computer-use projects |
 | [research/tech-stack.md](research/tech-stack.md) | Technology survey: per-OS capture, Traditional Chinese OCR, SQLite FTS5 and vectors, Tauri overlay, resource budget |
 | [research/cost-model.md](research/cost-model.md) | LLM cost estimates (2026-08 prices): monthly cost for four architecture scenarios |
+| [docs/PERSONA-GUIDELINES.md](docs/PERSONA-GUIDELINES.md) | Persona character definitions, Prompt boundaries and micro-dialectics, and the four-layer memory retention and deletion model |
 
 The design started from a roundtable debate among four models (Claude / Gemini / Grok / ChatGPT), 7
 questions × 5 rounds. The verbatim extraction is a private conversation and hasn't been published, but
