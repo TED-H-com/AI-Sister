@@ -196,6 +196,7 @@ fn partly_transparent(reply: &GetPropertyReply) -> bool {
     if reply.type_ == u32::from(AtomEnum::NONE) {
         return false;
     }
+    #[allow(clippy::nonminimal_bool)]
     !reply
         .value32()
         .and_then(|mut values| values.next())
