@@ -728,6 +728,8 @@ Phase 0 的七天自我錄製與磁碟預算還沒達成；CPU／RAM 的真機�
 | [research/tech-stack.md](research/tech-stack.md) | 技術選型調查：per-OS capture、繁中 OCR、SQLite FTS5/向量、Tauri overlay、資源預算 |
 | [research/cost-model.md](research/cost-model.md) | LLM 成本試算（2026-08 實價）：四種架構情境的月費 |
 | [docs/PERSONA-GUIDELINES.md](docs/PERSONA-GUIDELINES.md) | Persona 角色定義、Prompt 邊界與微辯證原則，以及四層記憶保留與刪除模型 |
+| [docs/API_REFERENCE.md](docs/API_REFERENCE.md) | API 參考文件：核心架構與各模組介面說明 |
+| [docs/DEVELOPER_USAGE.md](docs/DEVELOPER_USAGE.md) | 開發者使用指南：如何呼叫核心模組與注意事項 |
 
 設計源頭是一場四模型（Claude / Gemini / Grok / ChatGPT）7 題 × 5 輪的 roundtable
 辯論；其逐字萃取屬私下對話，未公開，但所有收斂結論與判決理由都寫進了上面三份設計文件

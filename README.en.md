@@ -890,6 +890,8 @@ Most documents under `docs/` and `research/` are in Traditional Chinese;
 | [research/tech-stack.md](research/tech-stack.md) | Technology survey: per-OS capture, Traditional Chinese OCR, SQLite FTS5 and vectors, Tauri overlay, resource budget |
 | [research/cost-model.md](research/cost-model.md) | LLM cost estimates (2026-08 prices): monthly cost for four architecture scenarios |
 | [docs/PERSONA-GUIDELINES.md](docs/PERSONA-GUIDELINES.md) | Persona character definitions, Prompt boundaries and micro-dialectics, and the four-layer memory retention and deletion model |
+| [docs/API_REFERENCE.md](docs/API_REFERENCE.md) | API Reference: Core architectures and module interface documentation |
+| [docs/DEVELOPER_USAGE.md](docs/DEVELOPER_USAGE.md) | Developer Usage Guidelines: Instructions for interacting with core modules |
 
 The design started from a roundtable debate among four models (Claude / Gemini / Grok / ChatGPT), 7
 questions × 5 rounds. The verbatim extraction is a private conversation and hasn't been published, but
