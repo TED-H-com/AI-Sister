@@ -6448,14 +6448,16 @@ mod tests {
 
     #[test]
     fn resolved_next_step_variants_covered() {
-        let mut db = crate::db::Db::open_in_memory().unwrap();
+        let db = crate::db::Db::open_in_memory().unwrap();
 
         let none = resolve_allowed_next_step(&db, &[], None).unwrap();
         assert!(matches!(none, ResolvedNextStep::NotAsked));
 
         let next = NextStepRef { fact: 999 };
         let missing_fact = resolve_allowed_next_step(&db, &[], Some(&next)).unwrap();
-        assert!(matches!(missing_fact, ResolvedNextStep::Refused(reason) if reason.contains("不存在")));
+        assert!(
+            matches!(missing_fact, ResolvedNextStep::Refused(reason) if reason.contains("不存在"))
+        );
     }
 
     #[test]

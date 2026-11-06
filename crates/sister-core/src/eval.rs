@@ -2276,8 +2276,8 @@ sys.stdout.buffer.write(out.encode('utf-8'))
 #[cfg(test)]
 mod e2e_tests {
     use super::*;
+    use crate::model::{ClipboardKind, FocusKind};
     use crate::replay::{Event, ReplayFocus};
-    use crate::model::{FocusKind, ClipboardKind};
 
     #[test]
     fn evidence_surfaces_for_focus_and_clipboard() {
@@ -2316,11 +2316,10 @@ mod e2e_tests {
     }
 
     #[test]
-
     fn event_supports_item_works_for_focus_and_text() {
         // We can't actually easily hit the unreachable! because of the early return `if channel == Session || Hypothesis`.
         // We'll skip trying to hit that panic directly unless necessary, because it's genuinely an unreachable branch.
-        // We can instead test that event_supports_item works normally for Event::Frame and other valid cases.
+        // We can instead test that event_supports_item works normally for Event::Focus and other valid cases.
         let event = Event::Focus {
             at_ms: 100,
             snapshot: ReplayFocus {
@@ -2338,7 +2337,10 @@ mod e2e_tests {
             RetrievalChannel::Text,
             &["My Window".to_string()],
         );
-        assert!(result, "event_supports_item should return true for matching values");
+        assert!(
+            result,
+            "event_supports_item should return true for matching values"
+        );
 
         let result_false = event_supports_item(
             &event,
@@ -2346,6 +2348,9 @@ mod e2e_tests {
             RetrievalChannel::Text,
             &["Non-matching Window".to_string()],
         );
-        assert!(!result_false, "event_supports_item should return false for mismatching values");
+        assert!(
+            !result_false,
+            "event_supports_item should return false for mismatching values"
+        );
     }
 }
