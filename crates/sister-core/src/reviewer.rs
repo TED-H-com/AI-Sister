@@ -6439,6 +6439,28 @@ mod tests {
     }
 
     #[test]
+    fn empty_spawn_error_reported() {
+        let spawn = empty_spawn("pass A 執行緒炸了");
+        assert_eq!(spawn.spawn_error.as_deref(), Some("pass A 執行緒炸了"));
+        let excerpt = pass_excerpt(&spawn);
+        assert_eq!(excerpt, "pass A 執行緒炸了");
+    }
+
+    #[test]
+    fn resolved_next_step_variants_covered() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+
+        let none = resolve_allowed_next_step(&db, &[], None).unwrap();
+        assert!(matches!(none, ResolvedNextStep::NotAsked));
+
+        let next = NextStepRef { fact: 999 };
+        let missing_fact = resolve_allowed_next_step(&db, &[], Some(&next)).unwrap();
+        assert!(
+            matches!(missing_fact, ResolvedNextStep::Refused(reason) if reason.contains("不存在"))
+        );
+    }
+
+    #[test]
     fn user_correction_is_not_overwritten_by_reviewer() {
         let mut db = Db::open_in_memory().expect("db");
         let ts = 1_700_500_000_000;
