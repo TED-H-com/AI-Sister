@@ -2272,3 +2272,80 @@ sys.stdout.buffer.write(out.encode('utf-8'))
         assert!(!text.contains("0.0%"), "{text}");
     }
 }
+
+#[cfg(test)]
+mod e2e_tests {
+    use super::*;
+    use crate::replay::{Event, ReplayFocus};
+    use crate::model::{FocusKind, ClipboardKind};
+
+    #[test]
+    fn evidence_surfaces_for_focus_and_clipboard() {
+        let focus_event = Event::Focus {
+            at_ms: 100,
+            snapshot: ReplayFocus {
+                app_id: Some("app.exe".into()),
+                app_name: Some("App".into()),
+                window_title: Some("My Window".into()),
+                url: Some("https://example.com".into()),
+            },
+            kind: FocusKind::Focus,
+        };
+
+        let surfaces = evidence_surfaces(&focus_event);
+        assert_eq!(surfaces.len(), 2);
+        assert_eq!(surfaces[0].0.as_str(), "window_title");
+        assert_eq!(surfaces[0].1, "My Window");
+        assert_eq!(surfaces[1].0.as_str(), "url");
+        assert_eq!(surfaces[1].1, "https://example.com");
+
+        let clipboard_event = Event::Clipboard {
+            at_ms: 200,
+            text: Some("Copied text".into()),
+            byte_len: 11,
+            kind: ClipboardKind::Text,
+            secret_suspected: false,
+            source_app: None,
+            truncated: false,
+        };
+
+        let surfaces = evidence_surfaces(&clipboard_event);
+        assert_eq!(surfaces.len(), 1);
+        assert_eq!(surfaces[0].0.as_str(), "clipboard");
+        assert_eq!(surfaces[0].1, "Copied text");
+    }
+
+    #[test]
+
+    fn event_supports_item_works_for_focus_and_text() {
+        // We can't actually easily hit the unreachable! because of the early return `if channel == Session || Hypothesis`.
+        // We'll skip trying to hit that panic directly unless necessary, because it's genuinely an unreachable branch.
+        // We can instead test that event_supports_item works normally for Event::Frame and other valid cases.
+        let event = Event::Focus {
+            at_ms: 100,
+            snapshot: ReplayFocus {
+                app_id: Some("app.exe".into()),
+                app_name: Some("App".into()),
+                window_title: Some("My Window".into()),
+                url: Some("https://example.com".into()),
+            },
+            kind: FocusKind::Focus,
+        };
+
+        let result = event_supports_item(
+            &event,
+            SourceKind::WindowTitle,
+            RetrievalChannel::Text,
+            &["My Window".to_string()],
+        );
+        assert!(result, "event_supports_item should return true for matching values");
+
+        let result_false = event_supports_item(
+            &event,
+            SourceKind::WindowTitle,
+            RetrievalChannel::Text,
+            &["Non-matching Window".to_string()],
+        );
+        assert!(!result_false, "event_supports_item should return false for mismatching values");
+    }
+}
