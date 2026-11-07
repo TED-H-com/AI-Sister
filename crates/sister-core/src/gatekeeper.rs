@@ -579,29 +579,45 @@ mod tests_additional_reasons {
 
     #[test]
     fn messages_format_properly() {
-        let hr = HoldReason::DailyBudgetExhausted { needed: 5, spent: 10, limit: 10 };
+        let hr = HoldReason::DailyBudgetExhausted {
+            needed: 5,
+            spent: 10,
+            limit: 10,
+        };
         assert!(hr.message().contains("這一句要 5 點"));
 
-        let hr = HoldReason::CategoryCoolingDown { remaining_minutes: 5 };
+        let hr = HoldReason::CategoryCoolingDown {
+            remaining_minutes: 5,
+        };
         assert!(hr.message().contains("還要 5 分鐘"));
 
-        let hr = HoldReason::QuietHours { ends_at: "08:00".into() };
+        let hr = HoldReason::QuietHours {
+            ends_at: "08:00".into(),
+        };
         assert!(hr.message().contains("08:00 才結束"));
 
         let hr = HoldReason::FullscreenFocus;
         assert_eq!(hr.code(), "fullscreen_focus");
         assert!(hr.message().contains("全螢幕專注模式中"));
 
-        let hr = HoldReason::ColdStartCategory { category: SpeakCategory::Stuck, days_remaining: 10 };
+        let hr = HoldReason::ColdStartCategory {
+            category: SpeakCategory::Stuck,
+            days_remaining: 10,
+        };
         assert!(hr.message().contains("還有 10 天"));
 
-        let hr = HoldReason::BelowScore { score: 0.1, threshold: 0.5 };
+        let hr = HoldReason::BelowScore {
+            score: 0.1,
+            threshold: 0.5,
+        };
         assert!(hr.message().contains("未達門檻 0.500"));
 
         let hr = HoldReason::MissingEvidence;
         assert!(hr.message().contains("沒有證據 ref"));
 
-        let hr = HoldReason::FirstUtteranceCategory { category: SpeakCategory::Stuck };
+        let hr = HoldReason::FirstUtteranceCategory {
+            category: SpeakCategory::Stuck,
+        };
         assert!(hr.message().contains("有史以來第一句只能是 a/b 類"));
 
         let hr = HoldReason::NotRecording { says: "xyz" };
@@ -610,7 +626,9 @@ mod tests_additional_reasons {
         let hr = HoldReason::PresenceUnreadable;
         assert!(hr.message().contains("讀不到心跳"));
 
-        let hr = HoldReason::OutrankedThisRound { by_text: "xyz".into() };
+        let hr = HoldReason::OutrankedThisRound {
+            by_text: "xyz".into(),
+        };
         assert!(hr.message().contains("xyz"));
         assert_eq!(hr.code(), "outranked_this_round");
     }

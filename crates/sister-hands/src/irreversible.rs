@@ -185,16 +185,12 @@ mod tests {
 mod tests_additional {
     use super::*;
 
+    #[derive(Default)]
     struct FullSink {
         proposed: Vec<IrreversibleIntent>,
         refused: Vec<(IrreversibleIntent, IrreversibleRefusal)>,
         approved: Vec<IrreversibleIntent>,
         executed: Vec<IrreversibleIntent>,
-    }
-    impl Default for FullSink {
-        fn default() -> Self {
-            Self { proposed: vec![], refused: vec![], approved: vec![], executed: vec![] }
-        }
     }
     impl sealed::Sealed for FullSink {}
     impl IrreversibleSink for FullSink {
@@ -229,17 +225,16 @@ mod tests_additional {
             target: "staging://pay".into(),
             details: "test".into(),
         };
-        let mut approver = DummyApprover { decision: LiveDecision::Approve };
+        let mut approver = DummyApprover {
+            decision: LiveDecision::Approve,
+        };
 
-        let outcome = dispatch(
-            &mut sink,
-            intent.clone(),
-            &mut approver,
-            || 10,
-            || true,
+        let outcome = dispatch(&mut sink, intent.clone(), &mut approver, || 10, || true);
+
+        assert_eq!(
+            outcome,
+            IrreversibleOutcome::Refused(IrreversibleRefusal::Stopped)
         );
-
-        assert_eq!(outcome, IrreversibleOutcome::Refused(IrreversibleRefusal::Stopped));
         assert_eq!(sink.proposed.len(), 1);
         assert_eq!(sink.refused.len(), 1);
         assert!(sink.approved.is_empty());
@@ -254,17 +249,16 @@ mod tests_additional {
             target: "staging://pay".into(),
             details: "test".into(),
         };
-        let mut approver = DummyApprover { decision: LiveDecision::Decline };
+        let mut approver = DummyApprover {
+            decision: LiveDecision::Decline,
+        };
 
-        let outcome = dispatch(
-            &mut sink,
-            intent.clone(),
-            &mut approver,
-            || 10,
-            || false,
+        let outcome = dispatch(&mut sink, intent.clone(), &mut approver, || 10, || false);
+
+        assert_eq!(
+            outcome,
+            IrreversibleOutcome::Refused(IrreversibleRefusal::Declined)
         );
-
-        assert_eq!(outcome, IrreversibleOutcome::Refused(IrreversibleRefusal::Declined));
         assert_eq!(sink.proposed.len(), 1);
         assert_eq!(sink.refused.len(), 1);
         assert!(sink.approved.is_empty());
@@ -279,17 +273,16 @@ mod tests_additional {
             target: "staging://pay".into(),
             details: "test".into(),
         };
-        let mut approver = DummyApprover { decision: LiveDecision::Stop };
+        let mut approver = DummyApprover {
+            decision: LiveDecision::Stop,
+        };
 
-        let outcome = dispatch(
-            &mut sink,
-            intent.clone(),
-            &mut approver,
-            || 10,
-            || false,
+        let outcome = dispatch(&mut sink, intent.clone(), &mut approver, || 10, || false);
+
+        assert_eq!(
+            outcome,
+            IrreversibleOutcome::Refused(IrreversibleRefusal::Stopped)
         );
-
-        assert_eq!(outcome, IrreversibleOutcome::Refused(IrreversibleRefusal::Stopped));
         assert_eq!(sink.proposed.len(), 1);
         assert_eq!(sink.refused.len(), 1);
         assert!(sink.approved.is_empty());
@@ -304,15 +297,11 @@ mod tests_additional {
             target: "staging://pay".into(),
             details: "test".into(),
         };
-        let mut approver = DummyApprover { decision: LiveDecision::Approve };
+        let mut approver = DummyApprover {
+            decision: LiveDecision::Approve,
+        };
 
-        let outcome = dispatch(
-            &mut sink,
-            intent.clone(),
-            &mut approver,
-            || 10,
-            || false,
-        );
+        let outcome = dispatch(&mut sink, intent.clone(), &mut approver, || 10, || false);
 
         assert_eq!(outcome, IrreversibleOutcome::Executed);
         assert_eq!(sink.proposed.len(), 1);
