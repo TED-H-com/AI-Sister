@@ -89,3 +89,13 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod tests_local_day_additional {
+    use super::*;
+
+    #[test]
+    fn bad_date_returns_none_for_bounds() {
+        assert!(local_day_bounds("not-a-date").is_none());
+    }
+}

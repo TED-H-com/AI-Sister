@@ -180,3 +180,164 @@ mod tests {
         assert!(sink.executed.is_empty());
     }
 }
+
+#[cfg(test)]
+mod tests_additional {
+    use super::*;
+
+    struct FullSink {
+        proposed: Vec<IrreversibleIntent>,
+        refused: Vec<(IrreversibleIntent, IrreversibleRefusal)>,
+        approved: Vec<IrreversibleIntent>,
+        executed: Vec<IrreversibleIntent>,
+    }
+    impl Default for FullSink {
+        fn default() -> Self {
+            Self { proposed: vec![], refused: vec![], approved: vec![], executed: vec![] }
+        }
+    }
+    impl sealed::Sealed for FullSink {}
+    impl IrreversibleSink for FullSink {
+        fn proposed(&mut self, intent: &IrreversibleIntent) {
+            self.proposed.push(intent.clone());
+        }
+        fn refused(&mut self, intent: IrreversibleIntent, why: IrreversibleRefusal) {
+            self.refused.push((intent, why));
+        }
+        fn approved(&mut self, intent: &IrreversibleIntent) {
+            self.approved.push(intent.clone());
+        }
+        fn execute(&mut self, intent: IrreversibleIntent) {
+            self.executed.push(intent);
+        }
+    }
+
+    struct DummyApprover {
+        decision: LiveDecision,
+    }
+    impl LiveApprover for DummyApprover {
+        fn present_and_ask(&mut self, _intent: &IrreversibleIntent) -> LiveDecision {
+            self.decision
+        }
+    }
+
+    #[test]
+    fn stopped_before_asking_approver() {
+        let mut sink = FullSink::default();
+        let intent = IrreversibleIntent {
+            class: crate::NeverInherited::Pay,
+            target: "staging://pay".into(),
+            details: "test".into(),
+        };
+        let mut approver = DummyApprover { decision: LiveDecision::Approve };
+
+        let outcome = dispatch(
+            &mut sink,
+            intent.clone(),
+            &mut approver,
+            || 10,
+            || true,
+        );
+
+        assert_eq!(outcome, IrreversibleOutcome::Refused(IrreversibleRefusal::Stopped));
+        assert_eq!(sink.proposed.len(), 1);
+        assert_eq!(sink.refused.len(), 1);
+        assert!(sink.approved.is_empty());
+        assert!(sink.executed.is_empty());
+    }
+
+    #[test]
+    fn approver_declines() {
+        let mut sink = FullSink::default();
+        let intent = IrreversibleIntent {
+            class: crate::NeverInherited::Pay,
+            target: "staging://pay".into(),
+            details: "test".into(),
+        };
+        let mut approver = DummyApprover { decision: LiveDecision::Decline };
+
+        let outcome = dispatch(
+            &mut sink,
+            intent.clone(),
+            &mut approver,
+            || 10,
+            || false,
+        );
+
+        assert_eq!(outcome, IrreversibleOutcome::Refused(IrreversibleRefusal::Declined));
+        assert_eq!(sink.proposed.len(), 1);
+        assert_eq!(sink.refused.len(), 1);
+        assert!(sink.approved.is_empty());
+        assert!(sink.executed.is_empty());
+    }
+
+    #[test]
+    fn approver_stops() {
+        let mut sink = FullSink::default();
+        let intent = IrreversibleIntent {
+            class: crate::NeverInherited::Pay,
+            target: "staging://pay".into(),
+            details: "test".into(),
+        };
+        let mut approver = DummyApprover { decision: LiveDecision::Stop };
+
+        let outcome = dispatch(
+            &mut sink,
+            intent.clone(),
+            &mut approver,
+            || 10,
+            || false,
+        );
+
+        assert_eq!(outcome, IrreversibleOutcome::Refused(IrreversibleRefusal::Stopped));
+        assert_eq!(sink.proposed.len(), 1);
+        assert_eq!(sink.refused.len(), 1);
+        assert!(sink.approved.is_empty());
+        assert!(sink.executed.is_empty());
+    }
+
+    #[test]
+    fn approved_and_executed() {
+        let mut sink = FullSink::default();
+        let intent = IrreversibleIntent {
+            class: crate::NeverInherited::Pay,
+            target: "staging://pay".into(),
+            details: "test".into(),
+        };
+        let mut approver = DummyApprover { decision: LiveDecision::Approve };
+
+        let outcome = dispatch(
+            &mut sink,
+            intent.clone(),
+            &mut approver,
+            || 10,
+            || false,
+        );
+
+        assert_eq!(outcome, IrreversibleOutcome::Executed);
+        assert_eq!(sink.proposed.len(), 1);
+        assert!(sink.refused.is_empty());
+        assert_eq!(sink.approved.len(), 1);
+        assert_eq!(sink.executed.len(), 1);
+    }
+
+    #[test]
+    fn complete_stops_if_stopped() {
+        let mut sink = FullSink::default();
+        let intent = IrreversibleIntent {
+            class: crate::NeverInherited::Pay,
+            target: "staging://pay".into(),
+            details: "test".into(),
+        };
+        let ticket = LiveApproval {
+            intent: intent.clone(),
+            issued_at_ms: 10,
+        };
+
+        assert_eq!(
+            complete(&mut sink, intent.clone(), Some(ticket), 10, true),
+            IrreversibleOutcome::Refused(IrreversibleRefusal::Stopped)
+        );
+        assert_eq!(sink.refused.len(), 1);
+    }
+}
