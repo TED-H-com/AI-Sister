@@ -160,3 +160,27 @@ fn check_window_title(wanted: &str, screen: &ScreenAfter) -> TargetOnScreen {
         }
     }
 }
+
+#[cfg(test)]
+mod tests_additional_screen {
+    use super::*;
+
+    #[test]
+    fn cannot_tell_ask_url_unreadable_returned() {
+        let action = ActionSnapshot::OpenUrl {
+            url: "not a valid url format".into(),
+        };
+        let screen = ScreenAfter {
+            window_title: Some("Title".into()),
+            url: Some("not a valid url format".into()),
+        };
+
+        let result = target_on_screen(&action, &screen);
+        assert!(matches!(
+            result,
+            TargetOnScreen::CannotTell {
+                why: CannotTell::AskUrlUnreadable
+            }
+        ));
+    }
+}

@@ -930,3 +930,20 @@ mod tests {
         assert!(validate_window_title("Visual Studio Code").is_ok());
     }
 }
+
+#[cfg(test)]
+mod tests_additional_target_policy {
+    use super::*;
+
+    #[test]
+    fn validate_url_errors_handled_properly() {
+        assert!(validate_url("no_scheme").is_err());
+        assert!(validate_url("http:without_slashes").is_err());
+        assert!(validate_url("http://site.com").is_ok());
+    }
+
+    #[test]
+    fn test_file_path() {
+        assert!(validate_file(std::path::Path::new("path/\0with_null")).is_err());
+    }
+}
